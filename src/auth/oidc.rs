@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::error::Error;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{State, Query};
 use axum::response::{IntoResponse, Redirect};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -30,17 +30,25 @@ impl Endpoints {
 }
 
 pub async fn auth_redirect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let code = Uuid::new_v4().to_string();
     let uri = format!(
         "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email&state={}",
         state.endpoints.authorization_endpoint,
         state.config.oidc_client_id,
         url::form_urlencoded::byte_serialize(state.config.oidc_callback_uri.as_bytes())
             .collect::<String>(),
-        Uuid::new_v4().to_string()
+        &code
     );
+    state.csrf_cache.insert(code, ()).await;
     Redirect::temporary(&uri)
 }
 
-pub async fn auth_callback(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[derive(Deserialize)]
+pub struct AuthCallbackQuery {
+    code: String,
+    state: String
+}
+
+pub async fn auth_callback(State(state): State<Arc<AppState>>,Query(query): Query<AuthCallbackQuery>) -> impl IntoResponse {
     
 }
