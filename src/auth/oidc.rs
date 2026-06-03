@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use crate::error::Error;
 use crate::state::AppState;
-use axum::extract::{State, Query};
+use axum::extract::{Query, Request, State};
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
+use axum::http::header;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -29,6 +33,31 @@ impl Endpoints {
     }
 }
 
+pub async fn enforce_auth(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    req: Request,
+    next: Next,
+) -> Result<impl IntoResponse, StatusCode> {
+    if let Some(cookie) = headers.get(header::COOKIE) {
+        let cookie = &cookie.to_str().unwrap_or("");
+        let torii_session = cookie.split(';').find_map(|pair| {
+            let pair: &str = pair.trim();
+            if pair.starts_with("torii_session=") {
+                Some(&pair["torii_session=".len()..])
+            } else {
+                None
+            }
+        });
+        if let Some(id) = torii_session {
+            if state.session_cache.contains_key(id) {
+                return Ok(next.run(req).await.into_response());
+            }
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
 pub async fn auth_redirect(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let code = Uuid::new_v4().to_string();
     let uri = format!(
@@ -46,9 +75,51 @@ pub async fn auth_redirect(State(state): State<Arc<AppState>>) -> impl IntoRespo
 #[derive(Deserialize)]
 pub struct AuthCallbackQuery {
     code: String,
-    state: String
+    state: String,
 }
 
-pub async fn auth_callback(State(state): State<Arc<AppState>>,Query(query): Query<AuthCallbackQuery>) -> impl IntoResponse {
-    
+#[derive(Deserialize, Clone)]
+pub struct TokenResponse {
+    access_token: String,
+    id_token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+pub async fn auth_callback(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuthCallbackQuery>,
+) -> Result<impl IntoResponse, Error> {
+    if let Some(_) = state.csrf_cache.remove(&query.state).await {
+        let response = reqwest::Client::new()
+            .post(&state.endpoints.token_endpoint)
+            .form(&[
+                ("client_id", state.config.oidc_client_id.as_str()),
+                ("client_secret", state.config.oidc_client_secret.as_str()),
+                ("code", query.code.as_str()),
+                ("grant_type", "authorization_code"),
+                ("redirect_uri", state.config.oidc_callback_uri.as_str()),
+            ])
+            .send()
+            .await?
+            .json::<TokenResponse>()
+            .await?;
+        let session_id = Uuid::new_v4().to_string();
+        let cookie = format!(
+            "torii_session={}; HttpOnly; Path=/; SameSite=Lax",
+            session_id
+        ); //TODO Add "Secure" when in prod not local testing
+        state.session_cache.insert(session_id, response).await;
+        Ok((
+            [(header::SET_COOKIE, cookie)],
+            Redirect::temporary("http://127.0.0.1:8080/SUCCESS"),
+        )
+            .into_response()) //TODO: Process the intended route the user wants to go
+    } else {
+        Ok(StatusCode::UNAUTHORIZED.into_response())
+    }
+}
+
+pub async fn exchange_tunnel_key(headers: HeaderMap) -> () {
+    todo!("Gen and exchange tunnel_key")
 }
