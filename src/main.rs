@@ -30,6 +30,7 @@ async fn main() {
         .time_to_live(Duration::from_secs(300))
         .build();
     let session_cache: Cache<String, TokenResponse> = Cache::builder().max_capacity(10_000).build();
+    let jwks_cache: 
     let state = Arc::new(AppState {
         config,
         endpoints,

@@ -3,11 +3,12 @@ use std::sync::Arc;
 use crate::error::Error;
 use crate::state::AppState;
 use axum::extract::{Query, Request, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, response};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
+use moka::ops::compute::Op;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ pub struct Endpoints {
     pub token_endpoint: String,
     pub userinfo_endpoint: String,
     pub end_session_endpoint: String,
+    pub jwks_uri: String
 }
 
 impl Endpoints {
@@ -118,6 +120,61 @@ pub async fn auth_callback(
     } else {
         Ok(StatusCode::UNAUTHORIZED.into_response())
     }
+}
+
+pub async fn validate_token() {
+
+}
+
+#[derive(Deserialize)]
+pub struct Jwks {
+    keys: Vec<Jwk>
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum Jwk {
+    Rsa(RsaKey),
+    Ec(EcKey)
+}
+
+#[derive(Deserialize)]
+pub struct RsaKey {
+    alg: String,
+    kid: String,
+    kty: String,
+    #[serde(rename = "use")]
+    key_use: Option<String>,
+    n: String,
+    e: String
+}
+
+#[derive(Deserialize)]
+pub struct EcKey {
+    alg: String,
+    kid: String,
+    kty: String,
+    #[serde(rename = "use")]
+    key_use: Option<String>,
+    crv: String,
+    x: String,
+    y: String
+}
+
+pub async fn fetch_jwks(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, Error> {
+    let response = reqwest::get(state.endpoints.jwks_uri.to_string()).json()::<Jwks>.await?;
+    for key in response.keys {
+        match key {
+            Jwk::Rsa(rsa_data) => {
+
+            }
+            Jwk::Ec(ec_data) => {
+
+            }
+        }
+    }
+    
+
 }
 
 pub async fn exchange_tunnel_key(headers: HeaderMap) -> () {
