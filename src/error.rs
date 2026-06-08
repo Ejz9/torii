@@ -24,6 +24,10 @@ pub enum Error {
     Uuid(#[from] uuid::Error),
     #[error(transparent)]
     Url(#[from] url::ParseError),
+    #[error(transparent)]
+    Jwt(#[from] jsonwebtoken::errors::Error),
+    #[error("Invalid or missing Key ID in token header")]
+    InvalidKeyId,
 }
 
 impl IntoResponse for Error {
@@ -39,6 +43,8 @@ impl IntoResponse for Error {
             Error::ParseIpv4Addr(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Parse ipv4 addr error"),
             Error::Uuid(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Uuid error"),
             Error::Url(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Url error"),
+            Error::Jwt(_) => (StatusCode::UNAUTHORIZED, "Invalid token signature or format"),
+            Error::InvalidKeyId => (StatusCode::UNAUTHORIZED, "Unknown signing key")
         };
         (status, error_message).into_response()
     }
