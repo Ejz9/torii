@@ -6,7 +6,7 @@ use crate::state::AppState;
 use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, request};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -23,6 +23,7 @@ pub struct Endpoints {
     pub userinfo_endpoint: String,
     pub end_session_endpoint: String,
     pub jwks_uri: String,
+    pub grant_types_supported: Option<Vec<String>>
 }
 
 impl Endpoints {
@@ -101,7 +102,7 @@ pub async fn auth_redirect(
 ) -> impl IntoResponse {
     let code = Uuid::new_v4().to_string();
     let uri = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email&state={}",
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email%20offline_access&state={}",
         state.endpoints.authorization_endpoint,
         state.config.oidc_client_id,
         url::form_urlencoded::byte_serialize(state.config.oidc_callback_uri.as_bytes())
@@ -122,6 +123,7 @@ pub struct AuthCallbackQuery {
 #[derive(Deserialize, Clone)]
 pub struct TokenResponse {
     access_token: String,
+    refresh_token: Option<String>,
     id_token: String,
     token_type: String,
     expires_in: u64,
@@ -187,7 +189,10 @@ pub async fn validate_token(state: Arc<AppState>, token: &str) -> Result<Claims,
     let mut key_wrapper = state.jwks_cache.get(&kid).await;
     if key_wrapper.is_none() {
         if !state.limiter_cache.contains_key("jwks_limiter") {
-            state.limiter_cache.insert("jwks_limiter".to_string(), ()).await;
+            state
+                .limiter_cache
+                .insert("jwks_limiter".to_string(), ())
+                .await;
             fetch_jwks(state.clone()).await?;
         }
         key_wrapper = state.jwks_cache.get(&kid).await;
