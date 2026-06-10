@@ -5,10 +5,12 @@ mod error;
 mod proxy;
 mod state;
 use axum::routing::any;
+use clap::Parser;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
+use crate::config::cli::Cli;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::state::AppState;
@@ -37,6 +39,7 @@ async fn main() {
         )
     }));
     */
+    let cli = Cli::parse();
     info!("Attempting to load environment...");
     dotenvy::dotenv().ok();
     let config = match Config::new() {
