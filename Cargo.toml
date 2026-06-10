@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap = "1.9.1"
 axum = "0.8.9"
 dotenvy = "0.15.7"
 hyper = "1.10.0"

@@ -9,8 +9,9 @@ use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::oidc::{
-    ActiveSession, auth_callback, auth_redirect, enforce_auth, exchange_tunnel_key, fetch_jwks
+    ActiveSession, auth_callback, auth_redirect, exchange_tunnel_key, fetch_jwks,
 };
+use crate::proxy::middleware::enforce_auth;
 use crate::proxy::router::handle_any;
 use crate::state::AppState;
 use crate::{auth::oidc::Endpoints, config::Config};
@@ -58,16 +59,22 @@ async fn main() {
         .max_capacity(10_000)
         .time_to_live(Duration::from_secs(300))
         .build();
-    let session_cache: Cache<String, ActiveSession> = Cache::builder().max_capacity(10_000).time_to_live(Duration::from_hours(168)).build();
+    let session_cache: Cache<String, ActiveSession> = Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_hours(168))
+        .build();
     let jwks_cache: Cache<String, DecodingKey> = Cache::new(20);
-    let limiter_cache: Cache<String, ()> = Cache::builder().max_capacity(10_000).time_to_live(Duration::from_secs(15)).build();
+    let limiter_cache: Cache<String, ()> = Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(15))
+        .build();
     let state = Arc::new(AppState {
         config,
         endpoints,
         csrf_cache,
         session_cache,
         jwks_cache,
-        limiter_cache
+        limiter_cache,
     });
     fetch_jwks(state.clone())
         .await

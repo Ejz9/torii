@@ -43,8 +43,11 @@ impl IntoResponse for Error {
             Error::ParseIpv4Addr(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Parse ipv4 addr error"),
             Error::Uuid(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Uuid error"),
             Error::Url(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Url error"),
-            Error::Jwt(_) => (StatusCode::UNAUTHORIZED, "Invalid token signature or format"),
-            Error::InvalidKeyId => (StatusCode::UNAUTHORIZED, "Unknown signing key")
+            Error::Jwt(_) => (
+                StatusCode::UNAUTHORIZED,
+                "Invalid token signature or format",
+            ),
+            Error::InvalidKeyId => (StatusCode::UNAUTHORIZED, "Unknown signing key"),
         };
         (status, error_message).into_response()
     }
