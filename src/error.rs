@@ -28,6 +28,8 @@ pub enum Error {
     Jwt(#[from] jsonwebtoken::errors::Error),
     #[error("Invalid or missing Key ID in token header")]
     InvalidKeyId,
+    #[error(transparent)]
+    Toml(#[from] toml::de::Error),
 }
 
 impl IntoResponse for Error {
@@ -48,6 +50,7 @@ impl IntoResponse for Error {
                 "Invalid token signature or format",
             ),
             Error::InvalidKeyId => (StatusCode::UNAUTHORIZED, "Unknown signing key"),
+            Error::Toml(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Toml error"),
         };
         (status, error_message).into_response()
     }

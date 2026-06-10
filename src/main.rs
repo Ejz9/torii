@@ -1,25 +1,21 @@
 mod auth;
 mod config;
+mod env;
 mod error;
 mod proxy;
 mod state;
 use axum::routing::any;
-use jsonwebtoken::DecodingKey;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
-use crate::auth::oidc::{
-    ActiveSession, auth_callback, auth_redirect, exchange_tunnel_key, fetch_jwks,
-};
-use crate::proxy::middleware::enforce_auth;
+use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
+use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::state::AppState;
-use crate::{auth::oidc::Endpoints, config::Config};
+use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware, serve};
 use dotenvy;
-use moka::future::Cache;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -51,31 +47,7 @@ async fn main() {
         }
     };
     info!("Environment loaded successfully!");
-    let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
-        .await
-        .expect("FATAL: Failed to fetch OIDC Discovery document");
-    info!("Preparing resources...");
-    let csrf_cache: Cache<String, String> = Cache::builder()
-        .max_capacity(10_000)
-        .time_to_live(Duration::from_secs(300))
-        .build();
-    let session_cache: Cache<String, ActiveSession> = Cache::builder()
-        .max_capacity(10_000)
-        .time_to_live(Duration::from_hours(168))
-        .build();
-    let jwks_cache: Cache<String, DecodingKey> = Cache::new(20);
-    let limiter_cache: Cache<String, ()> = Cache::builder()
-        .max_capacity(10_000)
-        .time_to_live(Duration::from_secs(15))
-        .build();
-    let state = Arc::new(AppState {
-        config,
-        endpoints,
-        csrf_cache,
-        session_cache,
-        jwks_cache,
-        limiter_cache,
-    });
+    let state = Arc::new(AppState::new(config).await.expect("Failed to build state"));
     fetch_jwks(state.clone())
         .await
         .expect("FATAL: Failed to fetch JWKS from OIDC provider");
