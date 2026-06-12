@@ -1,15 +1,14 @@
-
 #[derive(clap::Parser)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
     #[arg(short = 'c', long = "config", default_value = "/etc/torii/config.toml")]
-    config: String,
+    pub config: String,
     #[command(subcommand)]
-    command: Commands
+    pub command: Commands,
 }
 
 #[derive(clap::Subcommand, Clone)]
-enum Commands {
+pub enum Commands {
     Start,
-    Reload
+    Reload,
 }

@@ -2,9 +2,9 @@ use std::fs::read_to_string;
 use std::time::Duration;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
+use crate::config::structs::ToriiConfig;
 use crate::env::Config;
 use crate::error::Error;
-use crate::proxy::configuration::ToriiConfig;
 use arc_swap::ArcSwap;
 use jsonwebtoken::DecodingKey;
 use moka::future::Cache;
@@ -21,7 +21,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(config: Config) -> Result<Self, Error> {
+    pub async fn new(config: Config, config_path: String) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
             .expect("FATAL: Failed to fetch OIDC Discovery document");
@@ -39,7 +39,7 @@ impl AppState {
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(15))
             .build();
-        let configuration_file = read_to_string("config.toml")?;
+        let configuration_file = read_to_string(config_path)?;
         let configuration = from_str(&configuration_file)?;
         let routing_table = ArcSwap::from_pointee(configuration);
         Ok(Self {

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::auth::oidc::{ActiveSession, validate_token};
 use crate::auth::oidc::TokenResponse;
+use crate::auth::oidc::{ActiveSession, validate_token};
 use crate::state::AppState;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -28,7 +28,6 @@ fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
 
     request_headers.insert(header::AUTHORIZATION, header_token);
     request_headers.insert(HeaderName::from_static("x-forwarded-user"), header_name);
-    
 }
 
 #[instrument(skip(state, headers), err)]

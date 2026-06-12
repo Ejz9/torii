@@ -6,17 +6,21 @@ mod proxy;
 mod state;
 use axum::routing::any;
 use clap::Parser;
+use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
-use crate::config::cli::Cli;
+use crate::config::cli::{Cli, Commands};
+use crate::config::structs::ToriiConfig;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::state::AppState;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware, serve};
 use dotenvy;
+use std::fs::read_to_string;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -50,25 +54,46 @@ async fn main() {
         }
     };
     info!("Environment loaded successfully!");
-    let state = Arc::new(AppState::new(config).await.expect("Failed to build state"));
-    fetch_jwks(state.clone())
-        .await
-        .expect("FATAL: Failed to fetch JWKS from OIDC provider");
-    let addr = format!("{}:{}", state.config.host, state.config.port);
-    let public_routes = Router::new()
-        .route("/auth/login", any(auth_redirect))
-        .route("/auth/callback", any(auth_callback));
-    let private_routes = Router::new()
-        .route("/api/tunnel-key", any(exchange_tunnel_key))
-        .route("/{*path}", any(handle_any))
-        .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
-    let app = Router::new()
-        .merge(public_routes)
-        .merge(private_routes)
-        .with_state(state);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .expect("FATAL: Failed to bind to port or port is already in use");
-    info!("Listening on {}...", addr);
-    serve(listener, app).await.expect("FATAL: Failed to serve");
+    match cli.command {
+        Commands::Start => {
+            let state = Arc::new(AppState::new(config, cli.config).await.expect("Failed to build state"));
+            fetch_jwks(state.clone())
+                .await
+                .expect("FATAL: Failed to fetch JWKS from OIDC provider");
+            let addr = format!("{}:{}", state.config.host, state.config.port);
+            let public_routes = Router::new()
+                .route("/auth/login", any(auth_redirect))
+                .route("/auth/callback", any(auth_callback));
+            let private_routes = Router::new()
+                .route("/api/tunnel-key", any(exchange_tunnel_key))
+                .route("/{*path}", any(handle_any))
+                .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
+            let app = Router::new()
+                .merge(public_routes)
+                .merge(private_routes)
+                .with_state(state);
+            let listener = TcpListener::bind(&addr)
+                .await
+                .expect("FATAL: Failed to bind to port or port is already in use");
+            info!("Listening on {}...", addr);
+            serve(listener, app).await.expect("FATAL: Failed to serve");
+        }
+        Commands::Reload => {
+            let config = async {
+                let configuration_file = read_to_string(cli.config).ok()?;
+                let configuration: ToriiConfig = from_str(&configuration_file).ok()?;
+                Some(configuration)
+            }.await;
+
+            match UnixStream::connect("/tmp/torii.sock") {
+                Ok() => {
+                    std::process::exit(0)
+                }
+                Err() => {
+                    
+                }
+            }
+
+        }
+    }
 }

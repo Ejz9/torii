@@ -6,9 +6,9 @@ use std::sync::{
 use crate::error::Error;
 use crate::state::AppState;
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
-use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
@@ -59,8 +59,6 @@ impl Endpoints {
         Ok(endpoints)
     }
 }
-
-
 
 #[derive(Deserialize)]
 pub struct LoginQuery {
