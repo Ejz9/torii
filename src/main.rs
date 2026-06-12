@@ -23,6 +23,7 @@ use std::fs::read_to_string;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
 
 #[tokio::main]
 async fn main() {
@@ -79,21 +80,52 @@ async fn main() {
             serve(listener, app).await.expect("FATAL: Failed to serve");
         }
         Commands::Reload => {
-            let config = async {
-                let configuration_file = read_to_string(cli.config).ok()?;
-                let configuration: ToriiConfig = from_str(&configuration_file).ok()?;
-                Some(configuration)
-            }.await;
-
-            match UnixStream::connect("/tmp/torii.sock") {
-                Ok() => {
-                    std::process::exit(0)
+            let file_string = match read_to_string(cli.config) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("FATAL: Failed to read config file: {}", e);
+                    std::process::exit(1);
                 }
-                Err() => {
-                    
+            };
+            let config = match from_str(&file_string) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("FATAL: Invalid configuration: {}", e);
+                    std::process::exit(1);
                 }
+            };
+            let config_bytes = match (&config) { todo!(add serialization)
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("FATAL: Failed to serialize config: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let mut stream = match UnixStream::connect("/tmp/torii.sock").await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("FATAL: Failed to connect to socket: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let Ok(_) = stream.write_all(&config_bytes).await else {
+                eprintln!("FATAL: Failed to write to socket");
+                std::process::exit(1);
+            };
+            let response = match stream.read_u8().await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("FATAL: Daemon closed connection without confirming: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if response == 1 {
+                println!("Configruation reloaded!");
+                std::process::exit(0);
+            } else {
+                eprintln!("FATAL: Daemon rejected the configuration payload.");
+                std::process::exit(1);
             }
-
         }
     }
 }
