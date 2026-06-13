@@ -4,15 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ToriiConfig {
-    server: ServerConfig,
     security: SecurityConfig,
     routes: HashMap<String, RouteConfig>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ServerConfig {
-    listen_addr: String,
-    listen_port: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

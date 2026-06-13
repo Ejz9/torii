@@ -12,6 +12,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
+use crate::config::socket;
 use crate::config::structs::ToriiConfig;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
@@ -20,10 +21,9 @@ use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware, serve};
 use dotenvy;
 use std::fs::read_to_string;
-use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UnixStream};
 
 #[tokio::main]
 async fn main() {
@@ -57,7 +57,12 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let state = Arc::new(AppState::new(config, cli.config).await.expect("Failed to build state"));
+            let state = Arc::new(
+                AppState::new(config, cli.config)
+                    .await
+                    .expect("Failed to build state"),
+            );
+            tokio::spawn(socket::start_config_listener(state.clone()));
             fetch_jwks(state.clone())
                 .await
                 .expect("FATAL: Failed to fetch JWKS from OIDC provider");
@@ -87,14 +92,14 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
-            let config = match from_str(&file_string) {
+            let config: ToriiConfig = match from_str(&file_string) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("FATAL: Invalid configuration: {}", e);
                     std::process::exit(1);
                 }
             };
-            let config_bytes = match (&config) { todo!(add serialization)
+            let config_bytes = match postcard::to_allocvec(&config) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("FATAL: Failed to serialize config: {}", e);

@@ -17,7 +17,7 @@ pub struct AppState {
     pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
     pub limiter_cache: Cache<String, ()>,
-    pub routing_table: ArcSwap<ToriiConfig>,
+    pub dynamic_config: ArcSwap<ToriiConfig>,
 }
 
 impl AppState {
@@ -41,7 +41,7 @@ impl AppState {
             .build();
         let configuration_file = read_to_string(config_path)?;
         let configuration = from_str(&configuration_file)?;
-        let routing_table = ArcSwap::from_pointee(configuration);
+        let dynamic_config = ArcSwap::from_pointee(configuration);
         Ok(Self {
             config,
             endpoints,
@@ -49,7 +49,7 @@ impl AppState {
             session_cache,
             jwks_cache,
             limiter_cache,
-            routing_table,
+            dynamic_config,
         })
     }
 }
