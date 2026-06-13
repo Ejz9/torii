@@ -1,18 +1,18 @@
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use crate::error::Error;
 use crate::state::AppState;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, request};
-use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
-use tracing::{info, instrument};
-use url::form_urlencoded;
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -23,6 +23,7 @@ pub struct Endpoints {
     pub userinfo_endpoint: String,
     pub end_session_endpoint: String,
     pub jwks_uri: String,
+    pub grant_types_supported: Option<Vec<String>>,
 }
 
 impl Endpoints {
@@ -37,57 +38,26 @@ impl Endpoints {
             .await?
             .error_for_status()?;
         info!("OIDC endpoints located!");
-        Ok(response.json().await?)
-    }
-}
-
-#[instrument(skip(state, headers), err)]
-pub async fn enforce_auth(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    mut req: Request,
-    next: Next,
-) -> Result<impl IntoResponse, StatusCode> {
-    if let Some(cookie) = headers.get(header::COOKIE) {
-        let cookie = &cookie.to_str().unwrap_or("");
-        let torii_session = cookie.split(';').find_map(|pair| {
-            let pair: &str = pair.trim();
-            if pair.starts_with("torii_session=") {
-                Some(&pair["torii_session=".len()..])
-            } else {
-                None
+        let endpoints: Endpoints = response.json().await?;
+        match &endpoints.grant_types_supported {
+            None => {
+                warn!(
+                    "OIDC provider did not advertise supported grant types. Spec defaults applied. Background session invalidation via refresh tokens is assumed DISABLED."
+                )
             }
-        });
-        if let Some(id) = torii_session {
-            if let Some(session) = state.session_cache.get(id).await {
-                if session.claims.exp
-                    > SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                {
-                    let request_headers = req.headers_mut();
-                    let header_token = HeaderValue::from_str(&format!(
-                        "Bearer {}",
-                        session.user_token.access_token
-                    ))
-                    .unwrap();
-                    let header_name =
-                        HeaderValue::from_str(&session.claims.preferred_name).unwrap();
-                    request_headers.insert(header::AUTHORIZATION, header_token);
-                    request_headers
-                        .insert(HeaderName::from_static("x-forwarded-user"), header_name);
-                    return Ok(next.run(req).await.into_response());
-                } else {
-                    state.session_cache.remove(id).await;
-                }
+            Some(grants) if !grants.contains(&"refresh_token".to_string()) => {
+                warn!(
+                    "OIDC provider explicitly excluded 'refresh_token' from supported grants. Background session invalidation is DISABLED. Expired sessions will force a hard redirect."
+                )
+            }
+            Some(_) => {
+                info!(
+                    "Refresh token grant supported by upstream provider. Background session invalidation is ACTIVE."
+                )
             }
         }
+        Ok(endpoints)
     }
-    let original_uri = req.uri().to_string();
-    let return_param = form_urlencoded::byte_serialize(original_uri.as_bytes()).collect::<String>();
-    let login_url = format!("auth/login?return_to={}", return_param);
-    Ok(Redirect::temporary(&login_url).into_response())
 }
 
 #[derive(Deserialize)]
@@ -101,7 +71,7 @@ pub async fn auth_redirect(
 ) -> impl IntoResponse {
     let code = Uuid::new_v4().to_string();
     let uri = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email&state={}",
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email%20offline_access&state={}",
         state.endpoints.authorization_endpoint,
         state.config.oidc_client_id,
         url::form_urlencoded::byte_serialize(state.config.oidc_callback_uri.as_bytes())
@@ -121,18 +91,22 @@ pub struct AuthCallbackQuery {
 
 #[derive(Deserialize, Clone)]
 pub struct TokenResponse {
-    access_token: String,
-    id_token: String,
-    token_type: String,
-    expires_in: u64,
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub id_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
 }
 
 #[derive(Deserialize, Clone)]
 pub struct ActiveSession {
-    user_token: TokenResponse,
-    claims: Claims,
+    pub user_token: TokenResponse,
+    pub claims: Claims,
 }
 
+static TTL_WARNED: AtomicBool = AtomicBool::new(false);
+
+#[instrument(skip_all, err)]
 pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AuthCallbackQuery>,
@@ -152,6 +126,14 @@ pub async fn auth_callback(
             .json::<TokenResponse>()
             .await?;
         let valid_claims = validate_token(state.clone(), &response.id_token).await?;
+        if response.expires_in > 1800 {
+            if !TTL_WARNED.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "Token TTL is {} seconds. Consider shortening this upstream for better security.",
+                    &response.expires_in
+                );
+            }
+        }
         let session = ActiveSession {
             user_token: response,
             claims: valid_claims,
@@ -161,7 +143,7 @@ pub async fn auth_callback(
             "torii_session={}; HttpOnly; Path=/; SameSite=Lax",
             session_id
         ); //TODO Add "Secure" when in prod not local testing
-        state.session_cache.insert(session_id, session).await; // how to add ttl?
+        state.session_cache.insert(session_id, session).await;
         Ok((
             [(header::SET_COOKIE, cookie)],
             Redirect::temporary(&return_url),
@@ -174,10 +156,10 @@ pub async fn auth_callback(
 
 #[derive(Deserialize, Clone)]
 pub struct Claims {
-    sub: String,
-    exp: u64,
-    preferred_name: String,
-    name: String,
+    pub sub: String,
+    pub exp: u64,
+    pub preferred_name: String,
+    pub name: String,
 }
 
 #[instrument(skip(state, token), err)]
@@ -187,7 +169,10 @@ pub async fn validate_token(state: Arc<AppState>, token: &str) -> Result<Claims,
     let mut key_wrapper = state.jwks_cache.get(&kid).await;
     if key_wrapper.is_none() {
         if !state.limiter_cache.contains_key("jwks_limiter") {
-            state.limiter_cache.insert("jwks_limiter".to_string(), ()).await;
+            state
+                .limiter_cache
+                .insert("jwks_limiter".to_string(), ())
+                .await;
             fetch_jwks(state.clone()).await?;
         }
         key_wrapper = state.jwks_cache.get(&kid).await;
