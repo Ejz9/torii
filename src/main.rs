@@ -106,6 +106,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            // TODO: look into cross-platform solution
             let mut stream = match UnixStream::connect("/tmp/torii.sock").await {
                 Ok(s) => s,
                 Err(e) => {

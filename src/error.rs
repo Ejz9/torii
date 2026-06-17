@@ -30,6 +30,8 @@ pub enum Error {
     InvalidKeyId,
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
+    //#[error("Existing entry or key already exists")]
+    //Matchit(#[from] matchit::Error),
 }
 
 impl IntoResponse for Error {

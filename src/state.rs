@@ -20,11 +20,34 @@ pub struct AppState {
     pub dynamic_config: ArcSwap<ToriiConfig>,
 }
 
+const DEFAULT_CONFIG_STRING: &str = 
+r#"
+# Torii Gateway Configuration
+
+[security]
+# The number of malicious requests before the kernel drops the IP at the NIC
+ebpf_strike_threshold = 10
+# How long (in seconds) the offending IP remains locked out
+ebpf_lockout_duration_secs = 3600
+
+[routes]
+# Routes are defined by their subdomain and path
+# Set public_bypass to 'true' to skip OIDC authentication
+# Example:
+# [routes."ztree.dev"]
+# upstream = "192.168.0.1:3000"
+# public_bypass = false
+
+"#;
+
 impl AppState {
     pub async fn new(config: Config, config_path: String) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
             .expect("FATAL: Failed to fetch OIDC Discovery document");
+        if !std::path::Path::new(&config_path).exists() {
+            std::fs::write(&config_path, DEFAULT_CONFIG_STRING);
+        }
         info!("Preparing resources...");
         let csrf_cache: Cache<String, String> = Cache::builder()
             .max_capacity(10_000)
