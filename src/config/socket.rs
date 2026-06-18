@@ -6,7 +6,7 @@ use tokio::{
 };
 use tracing::error;
 
-use crate::state::AppState;
+use crate::{config::structs::ActiveState, state::AppState};
 
 pub async fn start_config_listener(state: Arc<AppState>) {
     std::fs::remove_file("/tmp/torii.sock").ok();
@@ -22,7 +22,11 @@ pub async fn start_config_listener(state: Arc<AppState>) {
                     let _ = stream.write_u8(0).await;
                     continue;
                 };
-                let Some(config) = postcard::from_bytes(&buffer[..bytes]).ok() else {
+                let Some(data) = postcard::from_bytes(&buffer[..bytes]).ok() else {
+                    let _ = stream.write_u8(0).await;
+                    continue;
+                };
+                let Some(config) = ActiveState::build(data).ok() else {
                     let _ = stream.write_u8(0).await;
                     continue;
                 };

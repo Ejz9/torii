@@ -12,7 +12,7 @@ pub struct ToriiConfig {
 
 pub struct ActiveState {
     security: SecurityConfig,
-    routes: matchit::Router<RouteConfig>
+    routes: matchit::Router<RouteConfig>,
 }
 
 impl ActiveState {
@@ -20,12 +20,15 @@ impl ActiveState {
         let mut router = matchit::Router::new();
         for (route, value) in config.routes.into_iter() {
             if route.ends_with('/') {
-                router.insert(format!("{}*catch_all", route), value);
+                router.insert(format!("{}*catch_all", route), value)?;
             } else {
-                router.insert(format!("{}/*catch_all", route), value);
+                router.insert(format!("{}/*catch_all", route), value)?;
             }
         }
-        Ok(ActiveState { security: config.security, routes: router})
+        Ok(ActiveState {
+            security: config.security,
+            routes: router,
+        })
     }
 }
 

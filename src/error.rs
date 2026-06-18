@@ -30,8 +30,10 @@ pub enum Error {
     InvalidKeyId,
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
-    //#[error("Existing entry or key already exists")]
-    //Matchit(#[from] matchit::Error),
+    #[error(transparent)]
+    ConfigError(#[from] matchit::InsertError),
+    #[error(transparent)]
+    RouteNotFound(#[from] matchit::MatchError),
 }
 
 impl IntoResponse for Error {
@@ -53,6 +55,8 @@ impl IntoResponse for Error {
             ),
             Error::InvalidKeyId => (StatusCode::UNAUTHORIZED, "Unknown signing key"),
             Error::Toml(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Toml error"),
+            Error::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Config error"),
+            Error::RouteNotFound(_) => (StatusCode::NOT_FOUND, "Requested URL not found"),
         };
         (status, error_message).into_response()
     }

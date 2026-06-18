@@ -2,7 +2,7 @@ use std::fs::read_to_string;
 use std::time::Duration;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
-use crate::config::structs::ToriiConfig;
+use crate::config::structs::ActiveState;
 use crate::env::Config;
 use crate::error::Error;
 use arc_swap::ArcSwap;
@@ -17,11 +17,10 @@ pub struct AppState {
     pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
     pub limiter_cache: Cache<String, ()>,
-    pub dynamic_config: ArcSwap<ToriiConfig>,
+    pub dynamic_config: ArcSwap<ActiveState>,
 }
 
-const DEFAULT_CONFIG_STRING: &str = 
-r#"
+const DEFAULT_CONFIG_STRING: &str = r#"
 # Torii Gateway Configuration
 
 [security]
@@ -63,7 +62,8 @@ impl AppState {
             .time_to_live(Duration::from_secs(15))
             .build();
         let configuration_file = read_to_string(config_path)?;
-        let configuration = from_str(&configuration_file)?;
+        let configuration_parsed = from_str(&configuration_file)?;
+        let configuration = ActiveState::build(configuration_parsed)?;
         let dynamic_config = ArcSwap::from_pointee(configuration);
         Ok(Self {
             config,
