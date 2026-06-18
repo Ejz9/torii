@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use axum::http;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
@@ -11,8 +12,8 @@ pub struct ToriiConfig {
 }
 
 pub struct ActiveState {
-    security: SecurityConfig,
-    routes: matchit::Router<RouteConfig>,
+    pub security: SecurityConfig,
+    pub routes: matchit::Router<ActiveRoute>,
 }
 
 impl ActiveState {
@@ -20,9 +21,15 @@ impl ActiveState {
         let mut router = matchit::Router::new();
         for (route, value) in config.routes.into_iter() {
             if route.ends_with('/') {
-                router.insert(format!("{}*catch_all", route), value)?;
+                router.insert(
+                    format!("{}*catch_all", route),
+                    value.try_into()?,
+                )?;
             } else {
-                router.insert(format!("{}/*catch_all", route), value)?;
+                router.insert(
+                    format!("{}/*catch_all", route),
+                    value.try_into()?,
+                )?;
             }
         }
         Ok(ActiveState {
@@ -42,4 +49,22 @@ pub struct SecurityConfig {
 pub struct RouteConfig {
     upstream: String,
     public_bypass: bool,
+    tls_insecure_skip_verify: bool,
+}
+
+pub struct ActiveRoute {
+    pub upstream: http::Uri,
+    pub public_bypass: bool,
+    pub tls_insecure_skip_verify: bool,
+}
+
+impl TryFrom<RouteConfig> for ActiveRoute {
+    type Error = Error;
+    fn try_from(config: RouteConfig) -> Result<Self, Self::Error> {
+        Ok(ActiveRoute {
+            upstream: config.upstream.parse()?,
+            public_bypass: config.public_bypass,
+            tls_insecure_skip_verify: config.tls_insecure_skip_verify,
+        })
+    }
 }

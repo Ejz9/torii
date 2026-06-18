@@ -34,6 +34,9 @@ pub enum Error {
     ConfigError(#[from] matchit::InsertError),
     #[error(transparent)]
     RouteNotFound(#[from] matchit::MatchError),
+    #[error(transparent)]
+    InvalidUri(#[from] axum::http::uri::InvalidUri),
+
 }
 
 impl IntoResponse for Error {
@@ -57,6 +60,7 @@ impl IntoResponse for Error {
             Error::Toml(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Toml error"),
             Error::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Config error"),
             Error::RouteNotFound(_) => (StatusCode::NOT_FOUND, "Requested URL not found"),
+            Error::InvalidUri(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Invalid URL"),
         };
         (status, error_message).into_response()
     }
