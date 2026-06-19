@@ -77,7 +77,8 @@ async fn main() {
             let app = Router::new()
                 .merge(public_routes)
                 .merge(private_routes)
-                .with_state(state);
+                .with_state(state)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
             let listener = TcpListener::bind(&addr)
                 .await
                 .expect("FATAL: Failed to bind to port or port is already in use");

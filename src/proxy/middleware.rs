@@ -17,14 +17,7 @@ fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
     let header_name = HeaderValue::from_str(&session.claims.preferred_name).unwrap();
     let header_token =
         HeaderValue::from_str(&format!("Bearer {}", session.user_token.access_token)).unwrap();
-    request_headers.remove("x-forwarded-user");
     request_headers.remove(header::AUTHORIZATION);
-    request_headers.remove("x-forwarded-email");
-    request_headers.remove("x-forwarded-groups");
-    request_headers.remove("x-forwarded-for");
-    request_headers.remove("x-forwarded-host");
-    request_headers.remove("x-forwarded-proto");
-    request_headers.remove("x-real-ip");
 
     request_headers.insert(header::AUTHORIZATION, header_token);
     request_headers.insert(HeaderName::from_static("x-forwarded-user"), header_name);
