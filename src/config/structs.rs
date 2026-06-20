@@ -20,17 +20,12 @@ impl ActiveState {
     pub fn build(config: ToriiConfig) -> Result<Self, Error> {
         let mut router = matchit::Router::new();
         for (route, value) in config.routes.into_iter() {
-            if route.ends_with('/') {
-                router.insert(
-                    format!("{}*catch_all", route),
-                    value.try_into()?,
-                )?;
-            } else {
-                router.insert(
-                    format!("{}/*catch_all", route),
-                    value.try_into()?,
-                )?;
-            }
+            let clean_route = route.trim_end_matches('/');
+            let exact_pattern = format!("/{}", clean_route);
+            router.insert(exact_pattern, value.clone().try_into()?)?;
+            
+            let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
+            router.insert(catch_all_pattern, value.try_into()?)?;
         }
         Ok(ActiveState {
             security: config.security,

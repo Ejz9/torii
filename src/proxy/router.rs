@@ -7,7 +7,7 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode, header};
 use std::sync::Arc;
-use tracing::error;
+use tracing::{error, info};
 
 pub async fn handle_any(
     State(state): State<Arc<AppState>>,
@@ -17,21 +17,31 @@ pub async fn handle_any(
     let source_ip = ip.ip().to_string();
     let (mut parts, body) = req.into_parts();
     let config = state.dynamic_config.load();
-    let Ok(matched_route) = config.routes.at(parts.uri.path()) else {
+    let host_string = parts
+        .headers
+        .get("HOST")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("unkown_host");
+    let mut path = parts.uri.path();
+    if path == "/" {
+        path = "";
+    }
+    let route = format!("/{}{}", host_string, path);
+    info!("Looking up route: {}", route);
+    let Ok(matched_route) = config.routes.at(&route) else {
+        tracing::error!("Lookup FAILED for key: '{}'", route);
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    
-    let new_uri = format!(
-        "{}{}",
-        matched_route.value.upstream,
-        matched_route.params.get("catch_all").unwrap_or("")
-    );
+
+    let catch_all = matched_route.params.get("catch_all").unwrap_or("");
+    let upstream_base = matched_route.value.upstream.to_string();
+    let upstream_clean = upstream_base.trim_end_matches('/');
+
+    let new_uri = format!("{}/{}", upstream_clean, catch_all);
     let tls_no_verify = matched_route.value.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
     inject_headers(&mut parts.headers, source_ip);
     let req = Request::from_parts(parts, body);
-
-
 
     let pool = if tls_no_verify {
         &state.insecure_connection_pool
@@ -40,9 +50,7 @@ pub async fn handle_any(
     };
 
     match pool.request(req).await {
-        Ok(res) => {
-            Ok(res.map(|body| Body::new(body)).into_response())
-        }
+        Ok(res) => Ok(res.map(|body| Body::new(body)).into_response()),
         Err(e) => {
             error!("URI: {}, Error: {}", new_uri, e);
             Err(Error::UpstreamTimeout)

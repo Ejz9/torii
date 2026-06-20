@@ -72,6 +72,7 @@ async fn main() {
                 .route("/auth/callback", any(auth_callback));
             let private_routes = Router::new()
                 .route("/api/tunnel-key", any(exchange_tunnel_key))
+                .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
             let app = Router::new()
