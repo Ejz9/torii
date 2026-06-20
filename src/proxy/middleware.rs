@@ -14,7 +14,7 @@ use tracing::instrument;
 use url::form_urlencoded;
 
 fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
-    let header_name = HeaderValue::from_str(&session.claims.preferred_name).unwrap();
+    let header_name = HeaderValue::from_str(&session.claims.name).unwrap();
     let header_token =
         HeaderValue::from_str(&format!("Bearer {}", session.user_token.access_token)).unwrap();
     request_headers.remove(header::AUTHORIZATION);
