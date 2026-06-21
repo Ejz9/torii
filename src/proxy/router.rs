@@ -7,7 +7,7 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode, header};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
 
 pub async fn handle_any(
     State(state): State<Arc<AppState>>,
@@ -16,29 +16,21 @@ pub async fn handle_any(
 ) -> Result<impl IntoResponse, Error> {
     let source_ip = ip.ip().to_string();
     let (mut parts, body) = req.into_parts();
-    let config = state.dynamic_config.load();
     let host_string = parts
         .headers
         .get("HOST")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("unkown_host");
-    let mut path = parts.uri.path();
-    if path == "/" {
-        path = "";
-    }
-    let route = format!("/{}{}", host_string, path);
-    info!("Looking up route: {}", route);
-    let Ok(matched_route) = config.routes.at(&route) else {
-        tracing::error!("Lookup FAILED for key: '{}'", route);
+    let path = parts.uri.path();
+    let Some(matched_route) = state.dynamic_config.load().find_route(host_string, path) else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let catch_all = matched_route.params.get("catch_all").unwrap_or("");
-    let upstream_base = matched_route.value.upstream.to_string();
+    let upstream_base = matched_route.route.upstream.to_string();
     let upstream_clean = upstream_base.trim_end_matches('/');
 
-    let new_uri = format!("{}/{}", upstream_clean, catch_all);
-    let tls_no_verify = matched_route.value.tls_insecure_skip_verify;
+    let new_uri = format!("{}/{}", upstream_clean, matched_route.catch_all);
+    let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
     inject_headers(&mut parts.headers, source_ip);
     let req = Request::from_parts(parts, body);

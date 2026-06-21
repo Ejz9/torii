@@ -16,6 +16,11 @@ pub struct ActiveState {
     pub routes: matchit::Router<ActiveRoute>,
 }
 
+pub struct RouteMatch {
+    pub route: ActiveRoute,
+    pub catch_all: String,
+}
+
 impl ActiveState {
     pub fn build(config: ToriiConfig) -> Result<Self, Error> {
         let mut router = matchit::Router::new();
@@ -23,13 +28,32 @@ impl ActiveState {
             let clean_route = route.trim_end_matches('/');
             let exact_pattern = format!("/{}", clean_route);
             router.insert(exact_pattern, value.clone().try_into()?)?;
-            
+
             let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
             router.insert(catch_all_pattern, value.try_into()?)?;
         }
         Ok(ActiveState {
             security: config.security,
             routes: router,
+        })
+    }
+
+    pub fn find_route(&self, host: &str, mut path: &str) -> Option<RouteMatch> {
+        if path == "/" {
+            path = "";
+        }
+        let route = format!("/{}{}", host, path);
+        let Ok(matched_route) = self.routes.at(&route) else {
+            return None;
+        };
+        let catch_all = matched_route
+            .params
+            .get("catch_all")
+            .unwrap_or("")
+            .to_string();
+        Some(RouteMatch {
+            route: matched_route.value.clone(),
+            catch_all,
         })
     }
 }
@@ -47,6 +71,7 @@ pub struct RouteConfig {
     tls_insecure_skip_verify: bool,
 }
 
+#[derive(Clone)]
 pub struct ActiveRoute {
     pub upstream: http::Uri,
     pub public_bypass: bool,

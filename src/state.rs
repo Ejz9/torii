@@ -83,8 +83,11 @@ impl AppState {
             .enable_http1()
             .enable_http2()
             .build();
-        let tls_no_verify = NoCertificateVerification{};
-        let insecure_tls_config = ClientConfig::builder().dangerous().with_custom_certificate_verifier(Arc::new(tls_no_verify)).with_no_client_auth();
+        let tls_no_verify = NoCertificateVerification {};
+        let insecure_tls_config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(tls_no_verify))
+            .with_no_client_auth();
         let insecure_connector = HttpsConnectorBuilder::new()
             .with_tls_config(insecure_tls_config)
             .https_or_http()
@@ -114,9 +117,7 @@ impl AppState {
 }
 
 #[derive(Debug)]
-pub struct NoCertificateVerification {
-
-}
+pub struct NoCertificateVerification {}
 
 impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
@@ -126,8 +127,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
         _: &rustls::pki_types::ServerName<'_>,
         _: &[u8],
         _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error>
-    {
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
@@ -135,8 +135,7 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
         _: &[u8],
         _: &rustls::pki_types::CertificateDer<'_>,
         _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-    {
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
     fn verify_tls13_signature(
@@ -144,11 +143,12 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
         _: &[u8],
         _: &rustls::pki_types::CertificateDer<'_>,
         _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
-    {
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms.supported_schemes()
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }

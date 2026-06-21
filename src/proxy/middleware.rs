@@ -37,6 +37,16 @@ pub async fn enforce_auth(
         let login_url = format!("auth/login?return_to={}", return_param);
         Ok(Redirect::temporary(&login_url).into_response())
     };
+    let path = req.uri().path();
+    let Some(host) = headers.get("HOST").and_then(|h| h.to_str().ok()) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(matched_route) = state.dynamic_config.load().find_route(host, path) else {
+        return bounce();
+    };
+    if matched_route.route.public_bypass {
+        return Ok(next.run(req).await.into_response());
+    }
     let Some(cookie) = headers.get(header::COOKIE) else {
         return bounce();
     };

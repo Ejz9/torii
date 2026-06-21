@@ -36,7 +36,6 @@ pub enum Error {
     RouteNotFound(#[from] matchit::MatchError),
     #[error(transparent)]
     InvalidUri(#[from] axum::http::uri::InvalidUri),
-
 }
 
 impl IntoResponse for Error {
