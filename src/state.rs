@@ -47,7 +47,7 @@ ebpf_lockout_duration_secs = 3600
 # [routes."ztree.dev"]
 # upstream = "http://192.168.0.1:3000"
 # public_bypass = false
-
+# allowed_asset_paths = ["/assets","/public"]
 "#;
 
 impl AppState {
@@ -95,11 +95,11 @@ impl AppState {
             .enable_http2()
             .build();
         let connection_pool = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
             .pool_max_idle_per_host(50)
             .build(connector);
         let insecure_connection_pool = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
             .pool_max_idle_per_host(50)
             .build(insecure_connector);
         Ok(Self {

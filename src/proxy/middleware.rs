@@ -31,24 +31,63 @@ pub async fn enforce_auth(
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
     let original_uri = req.uri().to_string();
-    let bounce = || {
+    let bounce = |is_background_asset: bool, sec_fetch_mode: &str| {
+        if is_background_asset || sec_fetch_mode == "cors" {
+            return Ok(StatusCode::UNAUTHORIZED.into_response());
+        }
         let return_param =
             form_urlencoded::byte_serialize(original_uri.as_bytes()).collect::<String>();
         let login_url = format!("auth/login?return_to={}", return_param);
         Ok(Redirect::temporary(&login_url).into_response())
     };
+    
+    if req.method().as_str() == "CONNECT" {
+        return Err(StatusCode::METHOD_NOT_ALLOWED)
+    }
+    let Some(sec_fetch_site) = headers.get("sec-fetch-site").and_then(|h| h.to_str().ok()) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    if sec_fetch_site == "cross-site"
+        && matches!(req.method().as_str(), "POST" | "PUT" | "DELETE" | "PATCH")
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(sec_fetch_dest) = headers.get("sec-fetch-dest").and_then(|h| h.to_str().ok()) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sec_fetch_mode) = headers.get("sec-fetch-mode").and_then(|h| h.to_str().ok()) else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let mut is_background_asset = false;
+    if matches!(
+        sec_fetch_dest,
+        "style" | "script" | "image" | "font" | "manifest"
+    ) {
+        is_background_asset = true;
+    }
+
     let path = req.uri().path();
     let Some(host) = headers.get("HOST").and_then(|h| h.to_str().ok()) else {
         return Err(StatusCode::BAD_REQUEST);
     };
     let Some(matched_route) = state.dynamic_config.load().find_route(host, path) else {
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
     if matched_route.route.public_bypass {
         return Ok(next.run(req).await.into_response());
     }
+    if is_background_asset
+        && matched_route
+            .route
+            .allowed_asset_paths
+            .iter()
+            .any(|path| matched_route.catch_all.starts_with(path))
+    {
+        return Ok(next.run(req).await.into_response());
+    }
+
     let Some(cookie) = headers.get(header::COOKIE) else {
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
     let cookie = &cookie.to_str().unwrap_or("");
     let torii_session = cookie.split(';').find_map(|pair| {
@@ -60,10 +99,10 @@ pub async fn enforce_auth(
         }
     });
     let Some(id) = torii_session else {
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
     let Some(session) = state.session_cache.get(id).await else {
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
     let request_headers = req.headers_mut();
     if session.claims.exp
@@ -76,7 +115,7 @@ pub async fn enforce_auth(
         return Ok(next.run(req).await.into_response());
     }
     let Some(token) = session.user_token.refresh_token else {
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
 
     let session_refresh = async {
@@ -108,7 +147,7 @@ pub async fn enforce_auth(
 
     let Some(session) = session_refresh else {
         state.session_cache.remove(id).await;
-        return bounce();
+        return bounce(is_background_asset, &sec_fetch_mode);
     };
 
     inject_headers(request_headers, &session);

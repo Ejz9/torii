@@ -69,6 +69,7 @@ pub struct RouteConfig {
     upstream: String,
     public_bypass: bool,
     tls_insecure_skip_verify: bool,
+    allowed_asset_paths: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -76,6 +77,7 @@ pub struct ActiveRoute {
     pub upstream: http::Uri,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
+    pub allowed_asset_paths: Vec<String>,
 }
 
 impl TryFrom<RouteConfig> for ActiveRoute {
@@ -85,6 +87,7 @@ impl TryFrom<RouteConfig> for ActiveRoute {
             upstream: config.upstream.parse()?,
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
+            allowed_asset_paths: config.allowed_asset_paths,
         })
     }
 }
