@@ -4,6 +4,7 @@ mod env;
 mod error;
 mod proxy;
 mod state;
+mod dns;
 use axum::routing::any;
 use clap::Parser;
 use toml::from_str;
@@ -63,6 +64,7 @@ async fn main() {
                     .expect("Failed to build state"),
             );
             tokio::spawn(socket::start_config_listener(state.clone()));
+            tokio::spawn(dns::start_acme_worker(state.clone()));
             fetch_jwks(state.clone())
                 .await
                 .expect("FATAL: Failed to fetch JWKS from OIDC provider");

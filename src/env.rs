@@ -10,6 +10,8 @@ pub struct Config {
     pub oidc_client_id: String,
     pub oidc_client_secret: String,
     pub oidc_callback_uri: String,
+    pub acme_provider: String,
+    pub acme_token: String
 }
 
 impl Config {
@@ -29,6 +31,8 @@ impl Config {
             var("OIDC_CLIENT_SECRET").map_err(|_| Error::Env("OIDC_CLIENT_SECRET".to_string()))?;
         let oidc_callback_uri =
             var("OIDC_CALLBACK_URI").map_err(|_| Error::Env("OIDC_CALLBACK_URI".to_string()))?;
+        let acme_provider= var("ACME_PROVIDER").map_err(|_| Error::Env("ACME_PROVIDER".to_string()))?;
+        let acme_token = var("ACME_TOKEN").map_err(|_| Error::Env("ACME_TOKEN".to_string()))?;
         Ok(Config {
             port,
             host,
@@ -37,6 +41,8 @@ impl Config {
             oidc_client_id,
             oidc_client_secret,
             oidc_callback_uri,
+            acme_provider,
+            acme_token
         })
     }
 }
