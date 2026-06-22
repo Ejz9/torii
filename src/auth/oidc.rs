@@ -160,6 +160,7 @@ pub struct Claims {
     pub exp: u64,
     pub preferred_name: Option<String>,
     pub name: String,
+    pub groups: Option<Vec<String>>,
 }
 
 #[instrument(skip(state, token), err)]

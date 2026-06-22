@@ -70,6 +70,7 @@ pub struct RouteConfig {
     public_bypass: bool,
     tls_insecure_skip_verify: bool,
     allowed_asset_paths: Vec<String>,
+    allowed_groups: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -78,6 +79,7 @@ pub struct ActiveRoute {
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
     pub allowed_asset_paths: Vec<String>,
+    pub allowed_groups: Vec<String>,
 }
 
 impl TryFrom<RouteConfig> for ActiveRoute {
@@ -88,6 +90,7 @@ impl TryFrom<RouteConfig> for ActiveRoute {
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
             allowed_asset_paths: config.allowed_asset_paths,
+            allowed_groups: config.allowed_groups,
         })
     }
 }
