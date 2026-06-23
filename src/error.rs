@@ -36,6 +36,8 @@ pub enum Error {
     RouteNotFound(#[from] matchit::MatchError),
     #[error(transparent)]
     InvalidUri(#[from] axum::http::uri::InvalidUri),
+    #[error("Invalid internet domain. Should contain at minimum base.tld")]
+    InvalidDomain,
 }
 
 impl IntoResponse for Error {
@@ -60,6 +62,7 @@ impl IntoResponse for Error {
             Error::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Config error"),
             Error::RouteNotFound(_) => (StatusCode::NOT_FOUND, "Requested URL not found"),
             Error::InvalidUri(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Invalid URL"),
+            Error::InvalidDomain => (StatusCode::INTERNAL_SERVER_ERROR, "Invalid domain"),
         };
         (status, error_message).into_response()
     }

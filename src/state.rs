@@ -55,8 +55,12 @@ impl AppState {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
             .expect("FATAL: Failed to fetch OIDC Discovery document");
-        if !std::path::Path::new(&config_path).exists() {
-            std::fs::write(&config_path, DEFAULT_CONFIG_STRING);
+        let path = std::path::Path::new(&config_path);
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, DEFAULT_CONFIG_STRING);
         }
         info!("Preparing resources...");
         let csrf_cache: Cache<String, String> = Cache::builder()

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use crate::{error::Error, state::AppState};
 
@@ -8,7 +8,13 @@ pub trait DnsProvider: Send + Sync {
 }
 
 pub async fn start_acme_worker(state: Arc<AppState>) {
-    
+    let path = Path::new(&state.config.cert_path);
+    if !path.exists() {
+        std::fs::create_dir_all(&state.config.cert_path);
+        loop {
+
+        }
+    }
 }
 
 pub struct CloudflareProvider {

@@ -1,10 +1,10 @@
 mod auth;
 mod config;
+mod dns;
 mod env;
 mod error;
 mod proxy;
 mod state;
-mod dns;
 use axum::routing::any;
 use clap::Parser;
 use toml::from_str;
