@@ -7,18 +7,16 @@ pub trait DnsProvider: Send + Sync {
     async fn delete_txt_record(&self, domain: &str, token: &str) -> Result<(), Error>;
 }
 
-pub async fn start_acme_worker(state: Arc<AppState>) {
+pub async fn start_acme_worker(state: Arc<AppState>, mut rx: tokio::sync::mpsc::Receiver<(Vec<String>, Vec<String>)>) {
     let path = Path::new(&state.config.cert_path);
     if !path.exists() {
         std::fs::create_dir_all(&state.config.cert_path);
-        loop {
-
-        }
+        loop {}
     }
 }
 
 pub struct CloudflareProvider {
-    api_token: String
+    api_token: String,
 }
 
 impl DnsProvider for CloudflareProvider {

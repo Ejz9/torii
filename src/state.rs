@@ -17,6 +17,7 @@ use jsonwebtoken::DecodingKey;
 use moka::future::Cache;
 use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
+use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::info;
 pub struct AppState {
@@ -29,6 +30,7 @@ pub struct AppState {
     pub dynamic_config: ArcSwap<ActiveState>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
+    pub tx: tokio::sync::mpsc::Sender<(Vec<String>, Vec<String>)>,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -51,7 +53,11 @@ ebpf_lockout_duration_secs = 3600
 "#;
 
 impl AppState {
-    pub async fn new(config: Config, config_path: String) -> Result<Self, Error> {
+    pub async fn new(
+        config: Config,
+        config_path: String,
+        tx: mpsc::Sender<(Vec<String>, Vec<String>)>,
+    ) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
             .expect("FATAL: Failed to fetch OIDC Discovery document");
@@ -78,8 +84,11 @@ impl AppState {
             .build();
         let configuration_file = read_to_string(config_path)?;
         let configuration_parsed = from_str(&configuration_file)?;
-        let configuration = ActiveState::build(configuration_parsed)?;
+        let (configuration, individual_certs, wildcard_certs) =
+            ActiveState::build(configuration_parsed)?;
         let dynamic_config = ArcSwap::from_pointee(configuration);
+        tx.send(individual_certs).await;
+        tx.send(wildcard_certs).await;
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
             .expect("no native root CA certificates found")
@@ -116,6 +125,7 @@ impl AppState {
             dynamic_config,
             connection_pool,
             insecure_connection_pool,
+            tx,
         })
     }
 }

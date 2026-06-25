@@ -22,7 +22,7 @@ pub struct RouteMatch {
 }
 
 impl ActiveState {
-    pub fn build(config: ToriiConfig) -> Result<Self, Error> {
+    pub fn build(config: ToriiConfig) -> Result<(Self, Vec<String>, Vec<String>), Error> {
         let mut individual_certs = vec![];
         let mut wildcard_certs = vec![];
         let mut router = matchit::Router::new();
@@ -38,8 +38,11 @@ impl ActiveState {
                             individual_certs.push(clean_route.to_string());
                         } else {
                             //FIX
-                            let root = clean_route.split_once(".").to_string();
-                            wildcard_certs.push(root)
+                            let (_, root) = clean_route.split_once(".").unwrap_or(("", ""));
+                            if root.is_empty() {
+                                continue;
+                            }
+                            wildcard_certs.push(root.to_string())
                         }
                     }
                 }
@@ -50,10 +53,14 @@ impl ActiveState {
             let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
             router.insert(catch_all_pattern, value.try_into()?)?;
         }
-        Ok(ActiveState {
-            security: config.security,
-            routes: router,
-        })
+        Ok((
+            ActiveState {
+                security: config.security,
+                routes: router,
+            },
+            individual_certs,
+            wildcard_certs,
+        ))
     }
 
     pub fn find_route(&self, host: &str, mut path: &str) -> Option<RouteMatch> {

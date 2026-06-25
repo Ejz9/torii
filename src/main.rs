@@ -7,6 +7,7 @@ mod proxy;
 mod state;
 use axum::routing::any;
 use clap::Parser;
+use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
@@ -58,13 +59,14 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
+            let (tx, mut rx) = mpsc::channel::<(Vec<String>, Vec<String>)>(20);
             let state = Arc::new(
-                AppState::new(config, cli.config)
+                AppState::new(config, cli.config, tx)
                     .await
                     .expect("Failed to build state"),
             );
             tokio::spawn(socket::start_config_listener(state.clone()));
-            tokio::spawn(dns::start_acme_worker(state.clone()));
+            tokio::spawn(dns::start_acme_worker(state.clone(), rx));
             fetch_jwks(state.clone())
                 .await
                 .expect("FATAL: Failed to fetch JWKS from OIDC provider");
