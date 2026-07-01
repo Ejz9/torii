@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
 use tokio::sync::mpsc;
 use toml::from_str;
-use tracing::info;
+use tracing::{error, info};
 pub struct AppState {
     pub config: Config,
     pub endpoints: Endpoints,
@@ -30,7 +31,7 @@ pub struct AppState {
     pub dynamic_config: ArcSwap<ActiveState>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
-    pub tx: tokio::sync::mpsc::Sender<(Vec<String>, Vec<String>)>,
+    pub tx: tokio::sync::mpsc::Sender<(HashSet<String>, HashSet<String>)>,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -56,7 +57,7 @@ impl AppState {
     pub async fn new(
         config: Config,
         config_path: String,
-        tx: mpsc::Sender<(Vec<String>, Vec<String>)>,
+        tx: mpsc::Sender<(HashSet<String>, HashSet<String>)>,
     ) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
@@ -66,7 +67,7 @@ impl AppState {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, DEFAULT_CONFIG_STRING);
+            std::fs::write(path, DEFAULT_CONFIG_STRING)?;
         }
         info!("Preparing resources...");
         let csrf_cache: Cache<String, String> = Cache::builder()
@@ -87,8 +88,10 @@ impl AppState {
         let (configuration, individual_certs, wildcard_certs) =
             ActiveState::build(configuration_parsed)?;
         let dynamic_config = ArcSwap::from_pointee(configuration);
-        tx.send(individual_certs).await;
-        tx.send(wildcard_certs).await;
+        if let Err(e) = tx.send((individual_certs, wildcard_certs)).await {
+            error!("FATAL: ACME worker thread is dead: {}", e);
+            std::process::exit(1);
+        }
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
             .expect("no native root CA certificates found")

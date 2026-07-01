@@ -10,7 +10,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;

@@ -1,3 +1,5 @@
+use crate::acme::dns::ProviderKind;
+use crate::acme::providers::cloudflare::CloudflareProvider;
 use crate::error::Error;
 use std::env::var;
 use std::net::Ipv4Addr;
@@ -10,8 +12,8 @@ pub struct Config {
     pub oidc_client_id: String,
     pub oidc_client_secret: String,
     pub oidc_callback_uri: String,
-    pub acme_provider: String,
-    pub acme_token: String,
+    pub acme_provider: ProviderKind,
+    pub acme_email: String,
     pub cert_path: String,
 }
 
@@ -32,10 +34,25 @@ impl Config {
             var("OIDC_CLIENT_SECRET").map_err(|_| Error::Env("OIDC_CLIENT_SECRET".to_string()))?;
         let oidc_callback_uri =
             var("OIDC_CALLBACK_URI").map_err(|_| Error::Env("OIDC_CALLBACK_URI".to_string()))?;
-        let acme_provider =
+        let acme_provider_string =
             var("ACME_PROVIDER").map_err(|_| Error::Env("ACME_PROVIDER".to_string()))?;
+        let acme_email = var("ACME_EMAIL").map_err(|_| Error::Env("ACME_EMAIL".to_string()))?;
+        let acme_zone_id =
+            var("ACME_ZONE_ID").map_err(|_| Error::Env("ACME_ZONE_ID".to_string()))?;
         let acme_token = var("ACME_TOKEN").map_err(|_| Error::Env("ACME_TOKEN".to_string()))?;
         let cert_path = var("CERT_PATH").unwrap_or_else(|_| "/var/lib/torii/certs/".to_string());
+        let acme_provider = match acme_provider_string.to_lowercase().as_str() {
+            "cloudflare" => ProviderKind::Cloudflare(CloudflareProvider {
+                zone_id: acme_zone_id,
+                api_token: acme_token,
+            }),
+            _ => {
+                return Err(Error::Env(format!(
+                    "Invalid ACME provider: {}",
+                    acme_provider_string
+                )));
+            }
+        };
         Ok(Config {
             port,
             host,
@@ -45,7 +62,7 @@ impl Config {
             oidc_client_secret,
             oidc_callback_uri,
             acme_provider,
-            acme_token,
+            acme_email,
             cert_path,
         })
     }

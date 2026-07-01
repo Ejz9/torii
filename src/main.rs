@@ -1,6 +1,6 @@
+mod acme;
 mod auth;
 mod config;
-mod dns;
 mod env;
 mod error;
 mod proxy;
@@ -12,6 +12,7 @@ use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::acme::dns;
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
 use crate::config::socket;
@@ -22,6 +23,7 @@ use crate::state::AppState;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware, serve};
 use dotenvy;
+use std::collections::HashSet;
 use std::fs::read_to_string;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,7 +61,7 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let (tx, mut rx) = mpsc::channel::<(Vec<String>, Vec<String>)>(20);
+            let (tx, rx) = mpsc::channel::<(HashSet<String>, HashSet<String>)>(20);
             let state = Arc::new(
                 AppState::new(config, cli.config, tx)
                     .await

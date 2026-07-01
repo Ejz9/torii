@@ -1,14 +1,29 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use axum::http::{self, uri};
+use rustls::crypto::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ToriiConfig {
+    #[serde(default)]
     security: SecurityConfig,
+    #[serde(default)]
     routes: HashMap<String, RouteConfig>,
+}
+
+impl Default for ToriiConfig {
+    fn default() -> Self {
+        Self {
+            security: SecurityConfig::default(),
+            routes: HashMap::new(),
+        }
+    }
 }
 
 pub struct ActiveState {
@@ -22,27 +37,30 @@ pub struct RouteMatch {
 }
 
 impl ActiveState {
-    pub fn build(config: ToriiConfig) -> Result<(Self, Vec<String>, Vec<String>), Error> {
-        let mut individual_certs = vec![];
-        let mut wildcard_certs = vec![];
+    pub fn build(config: ToriiConfig) -> Result<(Self, HashSet<String>, HashSet<String>), Error> {
+        let mut individual_certs = HashSet::new();
+        let mut wildcard_certs = HashSet::new();
         let mut router = matchit::Router::new();
         for (route, value) in config.routes.into_iter() {
             let clean_route = route.trim_end_matches('/');
             let domain = clean_route.parse::<DomainTier>()?;
             if value.tls_cert_path.is_none() && value.tls_key_path.is_none() {
                 match domain {
-                    DomainTier::Root => individual_certs.push(clean_route.to_string()),
-                    DomainTier::Nested => individual_certs.push(clean_route.to_string()),
+                    DomainTier::Root => {
+                        individual_certs.insert(clean_route.to_string());
+                    }
+                    DomainTier::Nested => {
+                        individual_certs.insert(clean_route.to_string());
+                    }
                     DomainTier::Subdomain => {
                         if value.individual_cert {
-                            individual_certs.push(clean_route.to_string());
+                            individual_certs.insert(clean_route.to_string());
                         } else {
-                            //FIX
                             let (_, root) = clean_route.split_once(".").unwrap_or(("", ""));
                             if root.is_empty() {
                                 continue;
                             }
-                            wildcard_certs.push(root.to_string())
+                            wildcard_certs.insert(root.to_string());
                         }
                     }
                 }
@@ -85,20 +103,50 @@ impl ActiveState {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SecurityConfig {
+    #[serde(default = "default_certificate_mode")]
     default_certificate_mode: String,
+    #[serde(default = "default_ebpf_strike_threshold")]
     ebpf_strike_threshold: u64,
+    #[serde(default = "default_ebpf_lockout_duration_secs")]
     ebpf_lockout_duration_secs: u64,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            default_certificate_mode: "wildcard".to_string(),
+            ebpf_strike_threshold: 10,
+            ebpf_lockout_duration_secs: 3600,
+        }
+    }
+}
+
+fn default_certificate_mode() -> String {
+    "wildcard".to_string()
+}
+fn default_ebpf_strike_threshold() -> u64 {
+    10
+}
+fn default_ebpf_lockout_duration_secs() -> u64 {
+    3600
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RouteConfig {
     upstream: String,
+    #[serde(default)]
     public_bypass: bool,
+    #[serde(default)]
     tls_insecure_skip_verify: bool,
+    #[serde(default)]
     individual_cert: bool,
+    #[serde(default)]
     tls_cert_path: Option<String>,
+    #[serde(default)]
     tls_key_path: Option<String>,
+    #[serde(default)]
     allowed_asset_paths: Vec<String>,
+    #[serde(default)]
     allowed_groups: Vec<String>,
 }
 

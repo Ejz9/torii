@@ -26,11 +26,17 @@ pub async fn start_config_listener(state: Arc<AppState>) {
                     let _ = stream.write_u8(0).await;
                     continue;
                 };
-                let Some(config) = ActiveState::build(data).ok() else {
+                let Some((config, individual_certs, wildcard_certs)) =
+                    ActiveState::build(data).ok()
+                else {
                     let _ = stream.write_u8(0).await;
                     continue;
                 };
                 state.dynamic_config.store(Arc::new(config));
+                if let Err(e) = state.tx.send((individual_certs, wildcard_certs)).await {
+                    error!("FATAL: ACME worker thread is dead: {}", e);
+                    std::process::exit(1);
+                }
                 let _ = stream.write_u8(1).await;
             }
             Err(e) => {
