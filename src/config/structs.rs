@@ -3,8 +3,7 @@ use std::{
     str::FromStr,
 };
 
-use axum::http::{self, uri};
-use rustls::crypto::hash::Hash;
+use axum::http;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
@@ -46,25 +45,23 @@ impl ActiveState {
             let domain = clean_route.parse::<DomainTier>()?;
             if value.tls_cert_path.is_none() && value.tls_key_path.is_none() {
                 match domain {
-                    DomainTier::Root => {
-                        individual_certs.insert(clean_route.to_string());
-                    }
-                    DomainTier::Nested => {
+                    DomainTier::Root | DomainTier:: Nested => {
                         individual_certs.insert(clean_route.to_string());
                     }
                     DomainTier::Subdomain => {
-                        if value.individual_cert {
+                        if value.individual_cert || !config.security.default_certificate_mode_wildcard {
                             individual_certs.insert(clean_route.to_string());
                         } else {
-                            let (_, root) = clean_route.split_once(".").unwrap_or(("", ""));
-                            if root.is_empty() {
-                                continue;
+                            if let Some((_, root)) = clean_route.split_once(".") {
+                            if !root.is_empty() {
+                                wildcard_certs.insert(root.to_string());
                             }
-                            wildcard_certs.insert(root.to_string());
+                            }
                         }
                     }
                 }
             }
+            // TODO add logic for self-signed certificates
             let exact_pattern = format!("/{}", clean_route);
             router.insert(exact_pattern, value.clone().try_into()?)?;
 
@@ -103,8 +100,8 @@ impl ActiveState {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SecurityConfig {
-    #[serde(default = "default_certificate_mode")]
-    default_certificate_mode: String,
+    #[serde(default = "default_certificate_mode_wildcard")]
+    default_certificate_mode_wildcard: bool,
     #[serde(default = "default_ebpf_strike_threshold")]
     ebpf_strike_threshold: u64,
     #[serde(default = "default_ebpf_lockout_duration_secs")]
@@ -114,15 +111,15 @@ pub struct SecurityConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            default_certificate_mode: "wildcard".to_string(),
+            default_certificate_mode_wildcard: false,
             ebpf_strike_threshold: 10,
             ebpf_lockout_duration_secs: 3600,
         }
     }
 }
 
-fn default_certificate_mode() -> String {
-    "wildcard".to_string()
+fn default_certificate_mode_wildcard() -> bool {
+    false
 }
 fn default_ebpf_strike_threshold() -> u64 {
     10
@@ -155,7 +152,6 @@ pub struct ActiveRoute {
     pub upstream: http::Uri,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
-    pub individual_cert: bool,
     pub allowed_asset_paths: Vec<String>,
     pub allowed_groups: Vec<String>,
 }
@@ -167,7 +163,6 @@ impl TryFrom<RouteConfig> for ActiveRoute {
             upstream: config.upstream.parse()?,
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
-            individual_cert: config.individual_cert,
             allowed_asset_paths: config.allowed_asset_paths,
             allowed_groups: config.allowed_groups,
         })

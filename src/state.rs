@@ -38,6 +38,8 @@ const DEFAULT_CONFIG_STRING: &str = r#"
 # Torii Gateway Configuration
 
 [security]
+# Determines if the proxy opts for wildcard certificates or individual certificates
+default_certificate_mode_wildcard = true
 # The number of malicious requests before the kernel drops the IP at the NIC
 ebpf_strike_threshold = 10
 # How long (in seconds) the offending IP remains locked out
