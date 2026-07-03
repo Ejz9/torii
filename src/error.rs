@@ -49,6 +49,14 @@ pub enum Error {
         domain: String,
         status: instant_acme::OrderStatus,
     },
+    #[error(transparent)]
+    RustlsPem(#[from] rustls::pki_types::pem::Error),
+    #[error(transparent)]
+    Rustls(#[from] rustls::Error),
+    #[error("Configuration Error {0}")]
+    InvalidCustomSetup(String),
+    #[error(transparent)]
+    InvalidHeader(#[from] hyper::header::InvalidHeaderValue),
 }
 
 impl IntoResponse for Error {
@@ -109,6 +117,18 @@ impl IntoResponse for Error {
                 format!("Acme validation failed for domain: {domain} with status: {status:?}"),
             )
                 .into_response(),
+            Error::RustlsPem(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Cryptography Error").into_response()
+            }
+            Error::Rustls(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Cryptography Error").into_response()
+            }
+            Error::InvalidCustomSetup(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid custom path").into_response()
+            }
+            Error::InvalidHeader(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid header").into_response()
+            }
         }
     }
 }

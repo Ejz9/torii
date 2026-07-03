@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
     response::IntoResponse,
 };
-use hyper::{HeaderMap, StatusCode, header};
+use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tracing::error;
@@ -22,35 +22,44 @@ pub async fn handle_any(
         .headers
         .get("HOST")
         .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown_host");
-    let mut is_websocket = false;
-    let upgrade_header = parts
-        .headers
-        .get("Upgrade")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-    let connection_header = parts
-        .headers
-        .get("Connection")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-    if upgrade_header == "websocket" && connection_header.contains("upgrade") {
-        is_websocket = true;
-    };
+        .unwrap_or("unknown_host")
+        .to_string();
     let path = parts.uri.path();
-    let Some(matched_route) = state.dynamic_config.load().find_route(host_string, path) else {
+    let Some(matched_route) = state.dynamic_config.load().find_route(&host_string, path) else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
     let upstream_base = matched_route.route.upstream.to_string();
     let upstream_clean = upstream_base.trim_end_matches('/');
+    let upstream_uri = upstream_base.parse::<hyper::Uri>()?;
+    let upstream_host_header = upstream_uri
+        .authority()
+        .map(|a| a.as_str())
+        .unwrap_or("localhost")
+        .to_string();
 
-    let new_uri = format!("{}/{}", upstream_clean, matched_route.catch_all);
+    let safe_path = if matched_route.catch_all.starts_with("/") {
+        matched_route.catch_all.clone()
+    } else {
+        format!("/{}", matched_route.catch_all)
+    };
+
+    let query = parts.uri.query().unwrap_or("");
+    let query_suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query)
+    };
+
+    let new_uri = format!("{}{}{}", upstream_clean, safe_path, query_suffix);
     let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
-    inject_headers(&mut parts.headers, source_ip, is_websocket);
+    inject_headers(
+        &mut parts.headers,
+        source_ip,
+        &upstream_host_header,
+        &host_string,
+    );
     let req = Request::from_parts(parts, body);
 
     let pool = if tls_no_verify {
@@ -85,27 +94,52 @@ pub async fn handle_any(
     }
 }
 
-fn inject_headers(request_headers: &mut HeaderMap, source_ip: String, is_websocket: bool) {
-    let header_source = HeaderValue::from_str(&source_ip).unwrap();
+fn inject_headers(
+    request_headers: &mut HeaderMap,
+    source_ip: String,
+    upstream_host: &str,
+    original_host: &str,
+) {
     request_headers.remove("x-forwarded-user");
-    request_headers.remove(header::AUTHORIZATION);
     request_headers.remove("x-forwarded-email");
     request_headers.remove("x-forwarded-groups");
     request_headers.remove("x-forwarded-for");
-    request_headers.remove("x-forwarded-host");
-    request_headers.remove("x-forwarded-proto");
     request_headers.remove("x-real-ip");
+    request_headers.remove(hyper::header::SERVER);
 
-    if !is_websocket {
-        request_headers.remove("Connection");
-        request_headers.remove("Upgrade");
-    }
-    request_headers.remove("Keep-Alive");
     request_headers.remove("Proxy-Authenticate");
     request_headers.remove("Proxy-Authorization");
     request_headers.remove("Te");
     request_headers.remove("Trailers");
     request_headers.remove("Transfer-Encoding");
 
-    request_headers.insert(HeaderName::from_static("x-forwarded-for"), header_source);
+    request_headers.insert(
+        HeaderName::from_static("x-forwarded-for"),
+        HeaderValue::from_str(&source_ip).unwrap(),
+    );
+    request_headers.insert(
+        HeaderName::from_static("x-forwarded-proto"),
+        HeaderValue::from_static("https"),
+    );
+    request_headers.insert(
+        hyper::header::HOST,
+        HeaderValue::from_str(upstream_host).unwrap(),
+    );
+    request_headers.insert(
+        HeaderName::from_static("x-forwarded-host"),
+        HeaderValue::from_str(original_host).unwrap(),
+    );
+    request_headers.insert(hyper::header::SERVER, HeaderValue::from_static("Torii"));
+    request_headers.insert(
+        hyper::header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+    );
+    request_headers.insert(
+        hyper::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    request_headers.insert(
+        hyper::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
 }

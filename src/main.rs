@@ -7,7 +7,10 @@ mod proxy;
 mod state;
 use axum::routing::any;
 use clap::Parser;
+use rustls::ServerConfig;
+use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
@@ -19,11 +22,12 @@ use crate::config::socket;
 use crate::config::structs::ToriiConfig;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
+use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
-use axum::{Router, middleware, serve};
+use axum::{Router, middleware};
 use dotenvy;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -61,7 +65,11 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let (tx, rx) = mpsc::channel::<(HashSet<String>, HashSet<String>)>(20);
+            let (tx, rx) = mpsc::channel::<(
+                HashSet<String>,
+                HashSet<String>,
+                HashMap<String, Arc<CertifiedKey>>,
+            )>(20);
             let state = Arc::new(
                 AppState::new(config, cli.config, tx)
                     .await
@@ -84,13 +92,20 @@ async fn main() {
             let app = Router::new()
                 .merge(public_routes)
                 .merge(private_routes)
-                .with_state(state)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+                .with_state(state.clone());
+            let mut config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
+                    &state.certificates,
+                ))));
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let acceptor = TlsAcceptor::from(Arc::new(config));
             let listener = TcpListener::bind(&addr)
                 .await
                 .expect("FATAL: Failed to bind to port or port is already in use");
             info!("Listening on {}...", addr);
-            serve(listener, app).await.expect("FATAL: Failed to serve");
+
+            serve(listener, app, acceptor).await
         }
         Commands::Reload => {
             let file_string = match read_to_string(cli.config) {

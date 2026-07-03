@@ -15,11 +15,6 @@ use url::form_urlencoded;
 
 fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
     let header_name = HeaderValue::from_str(&session.claims.name).unwrap();
-    let header_token =
-        HeaderValue::from_str(&format!("Bearer {}", session.user_token.access_token)).unwrap();
-    request_headers.remove(header::AUTHORIZATION);
-
-    request_headers.insert(header::AUTHORIZATION, header_token);
     request_headers.insert(HeaderName::from_static("x-forwarded-user"), header_name);
 }
 
@@ -37,7 +32,7 @@ pub async fn enforce_auth(
         }
         let return_param =
             form_urlencoded::byte_serialize(original_uri.as_bytes()).collect::<String>();
-        let login_url = format!("auth/login?return_to={}", return_param);
+        let login_url = format!("/auth/login?return_to={}", return_param);
         Ok(Redirect::temporary(&login_url).into_response())
     };
     if req.method().as_str() == "CONNECT" {
@@ -78,6 +73,7 @@ pub async fn enforce_auth(
     if matched_route.route.public_bypass {
         return Ok(next.run(req).await.into_response());
     }
+    // TODO PUBLIC PATH BYPASS
     if is_background_asset
         && matched_route
             .route
