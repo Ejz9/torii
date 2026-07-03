@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +18,7 @@ use jsonwebtoken::DecodingKey;
 use moka::future::Cache;
 use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
+use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::{error, info};
@@ -31,7 +32,12 @@ pub struct AppState {
     pub dynamic_config: ArcSwap<ActiveState>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
-    pub tx: tokio::sync::mpsc::Sender<(HashSet<String>, HashSet<String>)>,
+    pub tx: tokio::sync::mpsc::Sender<(
+        HashSet<String>,
+        HashSet<String>,
+        HashMap<String, Arc<CertifiedKey>>,
+    )>,
+    pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -59,7 +65,11 @@ impl AppState {
     pub async fn new(
         config: Config,
         config_path: String,
-        tx: mpsc::Sender<(HashSet<String>, HashSet<String>)>,
+        tx: mpsc::Sender<(
+            HashSet<String>,
+            HashSet<String>,
+            HashMap<String, Arc<CertifiedKey>>,
+        )>,
     ) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
@@ -87,13 +97,17 @@ impl AppState {
             .build();
         let configuration_file = read_to_string(config_path)?;
         let configuration_parsed = from_str(&configuration_file)?;
-        let (configuration, individual_certs, wildcard_certs) =
+        let (configuration, individual_certs, wildcard_certs, certs) =
             ActiveState::build(configuration_parsed)?;
         let dynamic_config = ArcSwap::from_pointee(configuration);
-        if let Err(e) = tx.send((individual_certs, wildcard_certs)).await {
+        if let Err(e) = tx
+            .send((individual_certs, wildcard_certs, certs.clone()))
+            .await
+        {
             error!("FATAL: ACME worker thread is dead: {}", e);
             std::process::exit(1);
         }
+        let certificates = Arc::new(ArcSwap::from_pointee(certs));
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
             .expect("no native root CA certificates found")
@@ -131,6 +145,7 @@ impl AppState {
             connection_pool,
             insecure_connection_pool,
             tx,
+            certificates,
         })
     }
 }

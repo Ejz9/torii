@@ -1,12 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     str::FromStr,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use arc_swap::ArcSwap;
 use axum::http;
+use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
+use tracing::{error, warn};
 
-use crate::error::Error;
+use crate::{acme::dns::parse_certificate, error::Error};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ToriiConfig {
@@ -36,38 +42,58 @@ pub struct RouteMatch {
 }
 
 impl ActiveState {
-    pub fn build(config: ToriiConfig) -> Result<(Self, HashSet<String>, HashSet<String>), Error> {
+    pub fn build(
+        config: ToriiConfig,
+    ) -> Result<
+        (
+            Self,
+            HashSet<String>,
+            HashSet<String>,
+            HashMap<String, Arc<CertifiedKey>>,
+        ),
+        Error,
+    > {
         let mut individual_certs = HashSet::new();
         let mut wildcard_certs = HashSet::new();
+        let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
         let mut router = matchit::Router::new();
         for (route, value) in config.routes.into_iter() {
             let clean_route = route.trim_end_matches('/');
             let domain = clean_route.parse::<DomainTier>()?;
             if value.tls_cert_path.is_none() && value.tls_key_path.is_none() {
                 match domain {
-                    DomainTier::Root | DomainTier:: Nested => {
+                    DomainTier::Root | DomainTier::Nested => {
                         individual_certs.insert(clean_route.to_string());
                     }
                     DomainTier::Subdomain => {
-                        if value.individual_cert || !config.security.default_certificate_mode_wildcard {
+                        if value.individual_cert
+                            || !config.security.default_certificate_mode_wildcard
+                        {
                             individual_certs.insert(clean_route.to_string());
                         } else {
                             if let Some((_, root)) = clean_route.split_once(".") {
-                            if !root.is_empty() {
-                                wildcard_certs.insert(root.to_string());
-                            }
+                                if !root.is_empty() {
+                                    wildcard_certs.insert(root.to_string());
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                let Ok(certificate) = validate_and_parse_custom_certificates(&value, clean_route)
+                else {
+                    error!("Failed to parse certificate for route: {}", route);
+                    continue;
+                };
+                valid_certificates.insert(clean_route.to_string(), certificate);
             }
-            // TODO add logic for self-signed certificates
             let exact_pattern = format!("/{}", clean_route);
             router.insert(exact_pattern, value.clone().try_into()?)?;
 
             let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
             router.insert(catch_all_pattern, value.try_into()?)?;
         }
+
         Ok((
             ActiveState {
                 security: config.security,
@@ -75,6 +101,7 @@ impl ActiveState {
             },
             individual_certs,
             wildcard_certs,
+            valid_certificates,
         ))
     }
 
@@ -96,6 +123,58 @@ impl ActiveState {
             catch_all,
         })
     }
+}
+
+fn validate_and_parse_custom_certificates(
+    config: &RouteConfig,
+    domain: &str,
+) -> Result<Arc<CertifiedKey>, Error> {
+    let Some(cert_path) = &config.tls_cert_path else {
+        error!("No certificate path provided for route: {}", domain);
+        return Err(Error::InvalidCustomSetup(format!(
+            "No certificate path provided for route {}",
+            domain
+        )));
+    };
+    let Some(key_path) = &config.tls_key_path else {
+        error!("No key path provided for route: {}", domain);
+        return Err(Error::InvalidCustomSetup(format!(
+            "No key path provided for route {}",
+            domain
+        )));
+    };
+    let cert_bytes = fs::read(cert_path)?;
+    let key_bytes = fs::read(key_path)?;
+    let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(&cert_bytes) else {
+        error!("Failed to parse pem file for domain: {}", domain);
+        return Err(Error::InvalidCustomSetup(format!(
+            "Failed to parse pem file for domain: {}",
+            domain
+        )));
+    };
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(&pem.contents) else {
+        error!("Failed to parse cert from pem file for domain: {}", domain);
+        return Err(Error::InvalidCustomSetup(format!(
+            "Failed to parse cert from pem file for domain: {}",
+            domain
+        )));
+    };
+    let not_after = cert.tbs_certificate.validity.not_after;
+    if (not_after.timestamp() as u64)
+        < SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+        || (not_after.timestamp() as u64)
+            < SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + Duration::from_hours(24 * 30).as_secs()
+    {
+        warn!("Certificate for {} is expired", domain)
+    }
+    Ok(parse_certificate(key_bytes, cert_bytes)?)
 }
 
 #[derive(Serialize, Deserialize, Clone)]

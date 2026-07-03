@@ -2,6 +2,11 @@ use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
     OrderStatus, RetryPolicy,
 };
+use rustls::crypto;
+use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::{pki_types::CertificateDer, sign::CertifiedKey};
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     fs,
@@ -10,7 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::sleep;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     acme::providers::{DnsProvider, cloudflare::CloudflareProvider},
@@ -20,10 +25,15 @@ use crate::{
 
 pub async fn start_acme_worker(
     state: Arc<AppState>,
-    mut rx: tokio::sync::mpsc::Receiver<(HashSet<String>, HashSet<String>)>,
+    mut rx: tokio::sync::mpsc::Receiver<(
+        HashSet<String>,
+        HashSet<String>,
+        HashMap<String, Arc<CertifiedKey>>,
+    )>,
 ) {
     let mut current_individual_certs = HashSet::new();
     let mut current_wildcard_certs = HashSet::new();
+    let mut current_custom_certificates = HashSet::new();
     let mut sleep_duration = Duration::from_hours(60 * 24);
     let path = Path::new(&state.config.cert_path);
     if !path.exists() {
@@ -35,12 +45,19 @@ pub async fn start_acme_worker(
     }
     loop {
         tokio::select! {
-            Some((new_individual_certs, new_wildcard_certs)) = rx.recv() => {
+            Some((new_individual_certs, new_wildcard_certs, custom_certs)) = rx.recv() => {
                 current_individual_certs = new_individual_certs;
                 current_wildcard_certs = new_wildcard_certs;
-                sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone()).await;
+
+                current_custom_certificates = custom_certs.keys().cloned().collect();
+
+                let mut active_map = (**state.certificates.load()).clone();
+                active_map.extend(custom_certs);
+                state.certificates.store(Arc::new(active_map));
+
+                sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await;
             }
-            _ = tokio::time::sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone()).await; }
+            _ = tokio::time::sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
         }
     }
 }
@@ -49,28 +66,60 @@ async fn refresh_certificates(
     state: &AppState,
     individual_certs: HashSet<String>,
     wildcard_certs: HashSet<String>,
+    custom_certs: &HashSet<String>,
 ) -> Duration {
-    let (sleep_duration, needs_refresh) =
-        validate_certificate_files(state, &individual_certs, &wildcard_certs);
+    let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> =
+        (**state.certificates.load()).clone();
+    let (sleep_duration, needs_refresh) = validate_certificate_files(
+        state,
+        &individual_certs,
+        &wildcard_certs,
+        &mut valid_certificates,
+        &custom_certs,
+    );
 
     let account = match get_or_create_account(&state).await {
         Ok(account) => account,
         Err(e) => {
             error!("Failed to get or create account: {}", e);
+            if !valid_certificates.is_empty() {
+                state.certificates.store(Arc::new(valid_certificates));
+            }
             return Duration::from_mins(5);
         }
     };
 
     let mut encountered_error = false;
     for domain in needs_refresh {
-        if let Err(e) = process_domain(&state, domain, &wildcard_certs, &account).await {
-            error!("Failed to process domain: {}", e);
-            encountered_error = true;
-        }
+        let certificate =
+            match process_domain(&state, domain.to_string(), &wildcard_certs, &account).await {
+                Ok(cert) => cert,
+                Err(e) => {
+                    error!("Failed to process domain {}: {}", domain, e);
+                    encountered_error = true;
+                    continue;
+                }
+            };
+
+        let key = if wildcard_certs.contains(&domain) {
+            format!("*.{}", domain)
+        } else {
+            domain
+        };
+
+        valid_certificates.insert(key, certificate);
+    }
+
+    if !valid_certificates.is_empty() {
+        state.certificates.store(Arc::new(valid_certificates));
     }
     if encountered_error {
         return Duration::from_mins(30);
     }
+    info!(
+        "Certifiates refreshed! ACME worker sleeping for: {} days",
+        sleep_duration.as_secs() / 86400
+    );
     sleep_duration
 }
 
@@ -78,13 +127,19 @@ fn validate_certificate_files(
     state: &AppState,
     individual_certs: &HashSet<String>,
     wildcard_certs: &HashSet<String>,
+    valid_certificates: &mut HashMap<String, Arc<CertifiedKey>>,
+    custom_certs: &HashSet<String>,
 ) -> (Duration, Vec<String>) {
     let mut needs_refresh: Vec<String> = Vec::new();
     let mut sleep_duration = Duration::from_hours(60 * 24);
     let base_path = Path::new(&state.config.cert_path);
     let individual_path = base_path.join("individual");
     let wildcard_path = base_path.join("wildcard");
-    let cleanup = |dir: &PathBuf, certs: &HashSet<String>| -> Result<(), Error> {
+    let cleanup = |dir: &PathBuf,
+                   certs: &HashSet<String>,
+                   valid_certs: &mut HashMap<String, Arc<CertifiedKey>>,
+                   custom_domains: &HashSet<String>|
+     -> Result<(), Error> {
         if !dir.exists() {
             return Ok(());
         }
@@ -94,10 +149,16 @@ fn validate_certificate_files(
             if !certs.contains(&domain) {
                 fs::remove_dir_all(entry.path())?;
             }
+            if valid_certs.contains_key(&domain) && !custom_domains.contains(&domain) {
+                valid_certs.remove_entry(&domain);
+            }
         }
         Ok(())
     };
-    let mut create_missing = |dir: &PathBuf, certs: &HashSet<String>| -> Result<(), Error> {
+    let mut create_missing = |dir: &PathBuf,
+                              certs: &HashSet<String>,
+                              valid_certs: &mut HashMap<String, Arc<CertifiedKey>>|
+     -> Result<(), Error> {
         if !dir.exists() {
             fs::create_dir_all(dir)?;
         }
@@ -114,7 +175,7 @@ fn validate_certificate_files(
                 needs_refresh.push(domain.clone());
                 continue;
             }
-            let Ok(file_bytes) = fs::read(cert_path) else {
+            let Ok(file_bytes) = fs::read(&cert_path) else {
                 error!("Failed to read cert file for domain: {}", domain);
                 needs_refresh.push(domain.clone());
                 continue;
@@ -160,19 +221,47 @@ fn validate_certificate_files(
                             .as_secs(),
                 );
             }
+            let Ok(key_bytes) = fs::read(key_path) else {
+                error!("Failed to read key file for domain: {}", domain);
+                continue;
+            };
+            let Ok(cert_bytes) = fs::read(cert_path) else {
+                error!("Failed to read cert file for domain: {}", domain);
+                continue;
+            };
+            let Ok(certificate) = parse_certificate(key_bytes, cert_bytes) else {
+                error!("Failed to parse certificate for domain: {}", domain);
+                continue;
+            };
+            let key = if wildcard_certs.contains(domain) {
+                format!("*.{}", domain)
+            } else {
+                domain.to_string()
+            };
+            valid_certs.insert(key, certificate);
         }
         Ok(())
     };
-    if let Err(e) = cleanup(&individual_path, &individual_certs) {
+    if let Err(e) = cleanup(
+        &individual_path,
+        &individual_certs,
+        valid_certificates,
+        custom_certs,
+    ) {
         error!("Failed to clean individual certs: {}", e)
     }
-    if let Err(e) = cleanup(&wildcard_path, &wildcard_certs) {
+    if let Err(e) = cleanup(
+        &wildcard_path,
+        &wildcard_certs,
+        valid_certificates,
+        custom_certs,
+    ) {
         error!("Failed to clean wildcard certs: {}", e)
     }
-    if let Err(e) = create_missing(&individual_path, &individual_certs) {
+    if let Err(e) = create_missing(&individual_path, &individual_certs, valid_certificates) {
         error!("Failed to create missing individual certs: {}", e)
     }
-    if let Err(e) = create_missing(&wildcard_path, &wildcard_certs) {
+    if let Err(e) = create_missing(&wildcard_path, &wildcard_certs, valid_certificates) {
         error!("Failed to create missing wildcard certs: {}", e)
     }
     (sleep_duration, needs_refresh)
@@ -221,7 +310,7 @@ async fn process_domain(
     domain: String,
     wildcard_certs: &HashSet<String>,
     account: &Account,
-) -> Result<(), Error> {
+) -> Result<Arc<CertifiedKey>, Error> {
     let (save_path, identifiers) = if wildcard_certs.contains(&domain) {
         (
             PathBuf::new()
@@ -267,7 +356,7 @@ async fn process_domain(
             .create_txt_record(&txt_record_name, &txt_value)
             .await?;
         cleanup_records.push((txt_record_name, record_id));
-        sleep(Duration::from_secs(15)).await;
+        sleep(Duration::from_secs(30)).await;
         challenge.set_ready().await?;
     }
     let status = order.poll_ready(&RetryPolicy::default()).await?;
@@ -286,9 +375,22 @@ async fn process_domain(
     }
     let private_key_pem = order.finalize().await?;
     let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
-    fs::write(save_path.join("privkey.pem"), private_key_pem)?;
-    fs::write(save_path.join("fullchain.pem"), cert_chain_pem)?;
-    Ok(())
+
+    fs::write(save_path.join("privkey.pem"), &private_key_pem)?;
+    fs::write(save_path.join("fullchain.pem"), &cert_chain_pem)?;
+    let certificate = parse_certificate(private_key_pem.into_bytes(), cert_chain_pem.into_bytes())?;
+    Ok(certificate)
+}
+
+pub fn parse_certificate(
+    private_key_bytes: Vec<u8>,
+    cert_chain_bytes: Vec<u8>,
+) -> Result<Arc<CertifiedKey>, Error> {
+    let key = PrivateKeyDer::from_pem_slice(&private_key_bytes)?;
+    let chain: Vec<CertificateDer> =
+        CertificateDer::pem_slice_iter(&cert_chain_bytes).collect::<Result<Vec<_>, _>>()?;
+    let signing_key = crypto::aws_lc_rs::sign::any_supported_type(&key)?;
+    Ok(Arc::new(CertifiedKey::new(chain, signing_key)))
 }
 
 #[derive(Debug)]
