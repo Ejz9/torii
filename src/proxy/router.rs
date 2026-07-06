@@ -22,6 +22,7 @@ pub async fn handle_any(
         .headers
         .get("HOST")
         .and_then(|h| h.to_str().ok())
+        .or_else(|| parts.uri.authority().map(|auth| auth.host()))
         .unwrap_or("unknown_host")
         .to_string();
     let path = parts.uri.path();
@@ -54,6 +55,7 @@ pub async fn handle_any(
     let new_uri = format!("{}{}{}", upstream_clean, safe_path, query_suffix);
     let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
+    parts.version = hyper::Version::HTTP_11;
     inject_headers(
         &mut parts.headers,
         source_ip,

@@ -45,6 +45,7 @@ pub async fn start_acme_worker(
     }
     loop {
         tokio::select! {
+            biased;
             Some((new_individual_certs, new_wildcard_certs, custom_certs)) = rx.recv() => {
                 current_individual_certs = new_individual_certs;
                 current_wildcard_certs = new_wildcard_certs;

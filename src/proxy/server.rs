@@ -1,10 +1,11 @@
 use arc_swap::ArcSwap;
 use axum::Router;
+use hyper_util::rt::TokioExecutor;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
@@ -56,34 +57,43 @@ pub async fn serve(listner: TcpListener, routes: Router, acceptor: TlsAcceptor) 
                         app.clone().call(req)
                     });
 
-                    if let Err(e) = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(io, service)
-                        .with_upgrades()
-                        .await
+                    if let Err(e) =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection(io, service)
+                            .await
                     {
-                        let is_client_disconnect = e.is_incomplete_message() || e.is_canceled();
-                        let is_io_disconnect = e
-                            .source()
-                            .and_then(|s| s.downcast_ref::<std::io::Error>())
-                            .map(|io_error| {
-                                matches!(
-                                    io_error.kind(),
-                                    std::io::ErrorKind::ConnectionReset
-                                        | std::io::ErrorKind::BrokenPipe
-                                        | std::io::ErrorKind::ConnectionAborted
-                                )
-                            })
-                            .unwrap_or(false);
-
-                        if is_client_disconnect || is_io_disconnect {
-                            debug!("Client disconnected early: {}", e);
-                        } else {
-                            error!("Failed to serve connection: {}", e)
-                        }
+                        handle_connection_error(e);
                     }
                 }
                 Err(e) => error!("TLS Handshake failed: {}", e),
             }
         });
+    }
+}
+
+fn handle_connection_error(e: Box<dyn std::error::Error + Send + Sync>) {
+    let is_client_disconnect = if let Some(error) = e.downcast_ref::<hyper::Error>() {
+        error.is_incomplete_message() || error.is_canceled()
+    } else {
+        false
+    };
+    let is_io_disconnect = e
+        .source()
+        .unwrap_or(e.as_ref())
+        .downcast_ref::<std::io::Error>()
+        .map(|io_error| {
+            matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+        })
+        .unwrap_or(false);
+
+    if is_client_disconnect || is_io_disconnect {
+        debug!("Client disconnected early: {}", e);
+    } else {
+        error!("Failed to serve connection: {}", e)
     }
 }

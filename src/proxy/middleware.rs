@@ -64,7 +64,11 @@ pub async fn enforce_auth(
     }
 
     let path = req.uri().path();
-    let Some(host) = headers.get("HOST").and_then(|h| h.to_str().ok()) else {
+    let Some(host) = headers
+        .get("HOST")
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| req.uri().authority().map(|auth| auth.host()))
+    else {
         return Err(StatusCode::BAD_REQUEST);
     };
     let Some(matched_route) = state.dynamic_config.load().find_route(host, path) else {
