@@ -27,7 +27,7 @@ pub async fn start_config_listener(state: Arc<AppState>) {
                     continue;
                 };
                 let Some((config, individual_certs, wildcard_certs, custom_certs)) =
-                    ActiveState::build(data).ok()
+                    ActiveState::build(data, &state.cert_verifier).ok()
                 else {
                     let _ = stream.write_u8(0).await;
                     continue;

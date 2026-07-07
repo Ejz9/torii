@@ -57,6 +57,10 @@ pub enum Error {
     InvalidCustomSetup(String),
     #[error(transparent)]
     InvalidHeader(#[from] hyper::header::InvalidHeaderValue),
+    #[error(transparent)]
+    WebPki(#[from] rustls::server::VerifierBuilderError),
+    #[error(transparent)]
+    ServerName(#[from] rustls::pki_types::InvalidDnsNameError),
 }
 
 impl IntoResponse for Error {
@@ -128,6 +132,10 @@ impl IntoResponse for Error {
             }
             Error::InvalidHeader(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Invalid header").into_response()
+            }
+            Error::WebPki(_) => (StatusCode::INTERNAL_SERVER_ERROR, "WebPki Error").into_response(),
+            Error::ServerName(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Server Name Error").into_response()
             }
         }
     }

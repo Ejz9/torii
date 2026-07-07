@@ -7,11 +7,14 @@ use std::{
 };
 
 use axum::http;
-use rustls::sign::CertifiedKey;
+use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::error;
 
-use crate::{acme::dns::parse_certificate, error::Error};
+use crate::{
+    acme::dns::{parse_certificate, verify_certificate_signature},
+    error::Error,
+};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ToriiConfig {
@@ -43,6 +46,7 @@ pub struct RouteMatch {
 impl ActiveState {
     pub fn build(
         config: ToriiConfig,
+        verifier: &Arc<WebPkiServerVerifier>,
     ) -> Result<
         (
             Self,
@@ -79,11 +83,14 @@ impl ActiveState {
                     }
                 }
             } else {
-                let Ok(certificate) = validate_and_parse_custom_certificates(&value, clean_route)
-                else {
-                    error!("Failed to parse certificate for route: {}", route);
-                    continue;
-                };
+                let certificate =
+                    match validate_and_parse_custom_certificates(&value, clean_route, verifier) {
+                        Ok(certificate) => certificate,
+                        Err(e) => {
+                            error!("Failed to parse certificate for route: {}: {}", route, e);
+                            continue;
+                        }
+                    };
                 valid_certificates.insert(clean_route.to_string(), certificate);
             }
             let exact_pattern = format!("/{}", clean_route);
@@ -127,6 +134,7 @@ impl ActiveState {
 fn validate_and_parse_custom_certificates(
     config: &RouteConfig,
     domain: &str,
+    verifier: &WebPkiServerVerifier,
 ) -> Result<Arc<CertifiedKey>, Error> {
     let Some(cert_path) = &config.tls_cert_path else {
         error!("No certificate path provided for route: {}", domain);
@@ -171,8 +179,16 @@ fn validate_and_parse_custom_certificates(
                 .as_secs()
                 + Duration::from_hours(24 * 30).as_secs()
     {
-        warn!("Certificate for {} is expired", domain)
+        error!(
+            "Certificate for {} is expired or expires in less than 30 days",
+            domain
+        );
+        return Err(Error::InvalidCustomSetup(format!(
+            "Certificate for {} is expired or expires in less than 30 days",
+            domain
+        )));
     }
+    verify_certificate_signature(verifier, domain, &cert_bytes)?;
     Ok(parse_certificate(key_bytes, cert_bytes)?)
 }
 

@@ -15,6 +15,7 @@ pub struct Config {
     pub acme_provider: ProviderKind,
     pub acme_email: String,
     pub cert_path: String,
+    pub custom_ca_path: String,
 }
 
 impl Config {
@@ -41,6 +42,7 @@ impl Config {
             var("ACME_ZONE_ID").map_err(|_| Error::Env("ACME_ZONE_ID".to_string()))?;
         let acme_token = var("ACME_TOKEN").map_err(|_| Error::Env("ACME_TOKEN".to_string()))?;
         let cert_path = var("CERT_PATH").unwrap_or_else(|_| "/var/lib/torii/certs/".to_string());
+        let custom_ca_path = var("CUSTOM_CA_PATH").unwrap_or_else(|_| "".to_string());
         let acme_provider = match acme_provider_string.to_lowercase().as_str() {
             "cloudflare" => ProviderKind::Cloudflare(CloudflareProvider {
                 zone_id: acme_zone_id,
@@ -64,6 +66,7 @@ impl Config {
             acme_provider,
             acme_email,
             cert_path,
+            custom_ca_path,
         })
     }
 }

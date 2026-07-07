@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
 use crate::config::structs::ActiveState;
@@ -16,12 +16,15 @@ use hyper_util::{
 };
 use jsonwebtoken::DecodingKey;
 use moka::future::Cache;
-use rustls::ClientConfig;
+use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
+use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
+use rustls::{ClientConfig, RootCertStore, pki_types};
 use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::{error, info};
+use webpki_roots::TLS_SERVER_ROOTS;
 pub struct AppState {
     pub config: Config,
     pub endpoints: Endpoints,
@@ -37,6 +40,7 @@ pub struct AppState {
         HashSet<String>,
         HashMap<String, Arc<CertifiedKey>>,
     )>,
+    pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
 }
 
@@ -97,8 +101,48 @@ impl AppState {
             .build();
         let configuration_file = read_to_string(config_path)?;
         let configuration_parsed = from_str(&configuration_file)?;
+        let mut cert_store = RootCertStore::empty();
+        cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());
+        if !config.cert_path.is_empty() {
+            let Ok(ca_certs) = pki_types::CertificateDer::pem_file_iter(&config.cert_path) else {
+                return Err(Error::Env(format!(
+                    "Failed to read custom CA bundle: {}",
+                    config.cert_path
+                )));
+            };
+            let valid_certs: Vec<_> = ca_certs.filter_map(Result::ok).collect();
+            for certificate in &valid_certs {
+                let Ok((_, cert)) = x509_parser::parse_x509_certificate(&certificate.as_ref())
+                else {
+                    return Err(Error::InvalidCustomSetup(
+                        "Failed to parse custom root DER bytes".to_string(),
+                    ));
+                };
+                let not_after = cert.tbs_certificate.validity.not_after;
+                if (not_after.timestamp() as u64)
+                    < SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                    || (not_after.timestamp() as u64)
+                        < SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            + Duration::from_hours(24 * 30).as_secs()
+                {
+                    return Err(Error::InvalidCustomSetup(format!(
+                        "A custom root CA in {} is expired or expires in less than 30 days",
+                        config.custom_ca_path
+                    )));
+                }
+            }
+            let _ = cert_store.add_parsable_certificates(valid_certs);
+        }
+        let root_store = Arc::new(cert_store);
+        let cert_verifier = WebPkiServerVerifier::builder(root_store).build()?;
         let (configuration, individual_certs, wildcard_certs, certs) =
-            ActiveState::build(configuration_parsed)?;
+            ActiveState::build(configuration_parsed, &cert_verifier)?;
         let dynamic_config = ArcSwap::from_pointee(configuration);
         if let Err(e) = tx
             .send((individual_certs, wildcard_certs, certs.clone()))
@@ -145,6 +189,7 @@ impl AppState {
             connection_pool,
             insecure_connection_pool,
             tx,
+            cert_verifier,
             certificates,
         })
     }

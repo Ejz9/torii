@@ -2,9 +2,11 @@ use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
     OrderStatus, RetryPolicy,
 };
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::ServerCertVerifier;
 use rustls::crypto;
-use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{PrivateKeyDer, ServerName, UnixTime};
 use rustls::{pki_types::CertificateDer, sign::CertifiedKey};
 use std::collections::HashMap;
 use std::{
@@ -230,6 +232,15 @@ fn validate_certificate_files(
                 error!("Failed to read cert file for domain: {}", domain);
                 continue;
             };
+            if let Err(e) = verify_certificate_signature(&state.cert_verifier, domain, &cert_bytes)
+            {
+                error!(
+                    "Failed to verify certificate signature for domain: {}: {}",
+                    domain, e
+                );
+                needs_refresh.push(domain.clone());
+                continue;
+            }
             let Ok(certificate) = parse_certificate(key_bytes, cert_bytes) else {
                 error!("Failed to parse certificate for domain: {}", domain);
                 continue;
@@ -392,6 +403,25 @@ pub fn parse_certificate(
         CertificateDer::pem_slice_iter(&cert_chain_bytes).collect::<Result<Vec<_>, _>>()?;
     let signing_key = crypto::aws_lc_rs::sign::any_supported_type(&key)?;
     Ok(Arc::new(CertifiedKey::new(chain, signing_key)))
+}
+
+pub fn verify_certificate_signature(
+    verifier: &WebPkiServerVerifier,
+    domain: &str,
+    cert_bytes: &[u8],
+) -> Result<(), Error> {
+    let server_name = ServerName::try_from(domain)?;
+    let chain: Vec<CertificateDer> =
+        CertificateDer::pem_slice_iter(&cert_bytes).collect::<Result<Vec<_>, _>>()?;
+    if chain.is_empty() {
+        error!("No certificates found for domain: {}", domain);
+        return Err(Error::InvalidCustomSetup(format!(
+            "No certificates found for domain: {}",
+            domain
+        )));
+    }
+    verifier.verify_server_cert(&chain[0], &chain[1..], &server_name, &[], UnixTime::now())?;
+    Ok(())
 }
 
 #[derive(Debug)]
