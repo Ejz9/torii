@@ -1,5 +1,5 @@
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
+    Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
     OrderStatus, RetryPolicy,
 };
 use rustls::client::WebPkiServerVerifier;
@@ -292,8 +292,8 @@ async fn get_or_create_account(state: &AppState) -> Result<Account, Error> {
         }
         false => {
             let mut contact_list = Vec::new();
-            if !state.config.acme_email.is_empty() {
-                contact_list.push(format!("mailto:{}", state.config.acme_email));
+            if let Some(email) = &state.config.acme_email {
+                contact_list.push(format!("mailto:{}", email));
             }
             let contact_refs: Vec<&str> = contact_list.iter().map(|s| s.as_str()).collect();
             let builder = Account::builder()?;
@@ -304,7 +304,7 @@ async fn get_or_create_account(state: &AppState) -> Result<Account, Error> {
                         terms_of_service_agreed: true,
                         only_return_existing: false,
                     },
-                    LetsEncrypt::Production.url().to_owned(), // staging if testing
+                    state.config.acme_directory_url.clone(), // staging if testing
                     None,
                 )
                 .await?;

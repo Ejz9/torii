@@ -103,11 +103,11 @@ impl AppState {
         let configuration_parsed = from_str(&configuration_file)?;
         let mut cert_store = RootCertStore::empty();
         cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());
-        if !config.cert_path.is_empty() {
-            let Ok(ca_certs) = pki_types::CertificateDer::pem_file_iter(&config.cert_path) else {
+        if let Some(path) = &config.custom_ca_path{
+            let Ok(ca_certs) = pki_types::CertificateDer::pem_file_iter(&path) else {
                 return Err(Error::Env(format!(
                     "Failed to read custom CA bundle: {}",
-                    config.cert_path
+                    path
                 )));
             };
             let valid_certs: Vec<_> = ca_certs.filter_map(Result::ok).collect();
@@ -133,7 +133,7 @@ impl AppState {
                 {
                     return Err(Error::InvalidCustomSetup(format!(
                         "A custom root CA in {} is expired or expires in less than 30 days",
-                        config.custom_ca_path
+                        path
                     )));
                 }
             }
