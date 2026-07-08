@@ -15,6 +15,7 @@ use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::acme::ddns;
 use crate::acme::dns;
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
@@ -77,6 +78,9 @@ async fn main() {
             );
             tokio::spawn(socket::start_config_listener(state.clone()));
             tokio::spawn(dns::start_acme_worker(state.clone(), rx));
+            if state.config.ddns {
+                tokio::spawn(ddns::start_ddns_worker(state.clone()));
+            }
             fetch_jwks(state.clone())
                 .await
                 .expect("FATAL: Failed to fetch JWKS from OIDC provider");

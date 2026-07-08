@@ -19,6 +19,8 @@ use crate::{
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ToriiConfig {
     #[serde(default)]
+    ddns_domain: Option<String>,
+    #[serde(default)]
     security: SecurityConfig,
     #[serde(default)]
     routes: HashMap<String, RouteConfig>,
@@ -27,6 +29,7 @@ pub struct ToriiConfig {
 impl Default for ToriiConfig {
     fn default() -> Self {
         Self {
+            ddns_domain: None,
             security: SecurityConfig::default(),
             routes: HashMap::new(),
         }
@@ -34,6 +37,7 @@ impl Default for ToriiConfig {
 }
 
 pub struct ActiveState {
+    pub ddns_domain: Option<String>,
     pub security: SecurityConfig,
     pub routes: matchit::Router<ActiveRoute>,
 }
@@ -102,6 +106,7 @@ impl ActiveState {
 
         Ok((
             ActiveState {
+                ddns_domain: config.ddns_domain,
                 security: config.security,
                 routes: router,
             },

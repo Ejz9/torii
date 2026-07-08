@@ -1,4 +1,4 @@
-use crate::acme::dns::ProviderKind;
+use crate::acme::providers::ProviderKind;
 use crate::acme::providers::cloudflare::CloudflareProvider;
 use crate::error::Error;
 use std::env::var;
@@ -17,6 +17,7 @@ pub struct Config {
     pub acme_email: Option<String>,
     pub cert_path: String,
     pub custom_ca_path: Option<String>,
+    pub ddns: bool,
 }
 
 impl Config {
@@ -44,7 +45,8 @@ impl Config {
         let acme_token = var("ACME_TOKEN").map_err(|_| Error::Env("ACME_TOKEN".to_string()))?;
         let cert_path = var("CERT_PATH").unwrap_or_else(|_| "/var/lib/torii/certs/".to_string());
         let custom_ca_path = var("CUSTOM_CA_PATH").ok();
-        let acme_directory_url = var("ACME_DIRECTORY_URL").unwrap_or_else(|_| instant_acme::LetsEncrypt::Production.url().to_owned());
+        let acme_directory_url = var("ACME_DIRECTORY_URL")
+            .unwrap_or_else(|_| instant_acme::LetsEncrypt::Production.url().to_owned());
         let acme_provider = match acme_provider_string.to_lowercase().as_str() {
             "cloudflare" => ProviderKind::Cloudflare(CloudflareProvider {
                 zone_id: acme_zone_id,
@@ -57,6 +59,7 @@ impl Config {
                 )));
             }
         };
+        let ddns = var("DDNS").map(|v| v == "true").unwrap_or(false);
         Ok(Config {
             port,
             host,
@@ -70,6 +73,7 @@ impl Config {
             acme_email,
             cert_path,
             custom_ca_path,
+            ddns,
         })
     }
 }

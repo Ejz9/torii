@@ -103,7 +103,7 @@ impl AppState {
         let configuration_parsed = from_str(&configuration_file)?;
         let mut cert_store = RootCertStore::empty();
         cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());
-        if let Some(path) = &config.custom_ca_path{
+        if let Some(path) = &config.custom_ca_path {
             let Ok(ca_certs) = pki_types::CertificateDer::pem_file_iter(&path) else {
                 return Err(Error::Env(format!(
                     "Failed to read custom CA bundle: {}",

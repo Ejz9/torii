@@ -1,6 +1,6 @@
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
-    OrderStatus, RetryPolicy,
+    Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
+    RetryPolicy,
 };
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
@@ -19,11 +19,7 @@ use std::{
 use tokio::time::sleep;
 use tracing::{error, info};
 
-use crate::{
-    acme::providers::{DnsProvider, cloudflare::CloudflareProvider},
-    error::Error,
-    state::AppState,
-};
+use crate::{error::Error, state::AppState};
 
 pub async fn start_acme_worker(
     state: Arc<AppState>,
@@ -422,22 +418,4 @@ pub fn verify_certificate_signature(
     }
     verifier.verify_server_cert(&chain[0], &chain[1..], &server_name, &[], UnixTime::now())?;
     Ok(())
-}
-
-#[derive(Debug)]
-pub enum ProviderKind {
-    Cloudflare(CloudflareProvider),
-}
-
-impl ProviderKind {
-    async fn create_txt_record(&self, domain: &str, token: &str) -> Result<String, Error> {
-        match self {
-            ProviderKind::Cloudflare(provider) => provider.create_txt_record(domain, token).await,
-        }
-    }
-    async fn delete_txt_record(&self, token: &str) -> Result<(), Error> {
-        match self {
-            ProviderKind::Cloudflare(provider) => provider.delete_txt_record(token).await,
-        }
-    }
 }
