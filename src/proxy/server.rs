@@ -59,7 +59,7 @@ pub async fn serve(listner: TcpListener, routes: Router, acceptor: TlsAcceptor) 
 
                     if let Err(e) =
                         hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .serve_connection(io, service)
+                            .serve_connection_with_upgrades(io, service)
                             .await
                     {
                         handle_connection_error(e);

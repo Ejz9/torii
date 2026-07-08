@@ -8,7 +8,7 @@ use axum::{
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error};
 
 pub async fn handle_any(
     State(state): State<Arc<AppState>>,
@@ -81,10 +81,15 @@ pub async fn handle_any(
                         {
                             let mut client_io = TokioIo::new(client_stream);
                             let mut server_io = TokioIo::new(server_stream);
-                            let _ =
-                                tokio::io::copy_bidirectional(&mut client_io, &mut server_io).await;
+                            if let Err(e) =
+                                tokio::io::copy_bidirectional(&mut client_io, &mut server_io).await
+                            {
+                                debug!("WebSocket stream closed or interrupted: {}", e)
+                            }
                         }
                     });
+                } else {
+                    debug!("Failed to upgrade. Client or server rejected the handshake.")
                 }
             }
             Ok(res.map(|body| Body::new(body)).into_response())
