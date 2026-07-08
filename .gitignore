@@ -1,2 +1,5 @@
 /target
 .env
+.DS_STORE
+torii.code-workspace
+/certs

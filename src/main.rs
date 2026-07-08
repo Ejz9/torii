@@ -1,3 +1,4 @@
+mod acme;
 mod auth;
 mod config;
 mod env;
@@ -6,20 +7,28 @@ mod proxy;
 mod state;
 use axum::routing::any;
 use clap::Parser;
+use rustls::ServerConfig;
+use rustls::sign::CertifiedKey;
+use tokio::sync::mpsc;
+use tokio_rustls::TlsAcceptor;
 use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::acme::ddns;
+use crate::acme::dns;
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
 use crate::config::socket;
 use crate::config::structs::ToriiConfig;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
+use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
-use axum::{Router, middleware, serve};
+use axum::{Router, middleware};
 use dotenvy;
+use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,12 +66,21 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
+            let (tx, rx) = mpsc::channel::<(
+                HashSet<String>,
+                HashSet<String>,
+                HashMap<String, Arc<CertifiedKey>>,
+            )>(20);
             let state = Arc::new(
-                AppState::new(config, cli.config)
+                AppState::new(config, cli.config, tx)
                     .await
                     .expect("Failed to build state"),
             );
             tokio::spawn(socket::start_config_listener(state.clone()));
+            tokio::spawn(dns::start_acme_worker(state.clone(), rx));
+            if state.config.ddns {
+                tokio::spawn(ddns::start_ddns_worker(state.clone()));
+            }
             fetch_jwks(state.clone())
                 .await
                 .expect("FATAL: Failed to fetch JWKS from OIDC provider");
@@ -72,17 +90,26 @@ async fn main() {
                 .route("/auth/callback", any(auth_callback));
             let private_routes = Router::new()
                 .route("/api/tunnel-key", any(exchange_tunnel_key))
+                .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
             let app = Router::new()
                 .merge(public_routes)
                 .merge(private_routes)
-                .with_state(state);
+                .with_state(state.clone());
+            let mut config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
+                    &state.certificates,
+                ))));
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let acceptor = TlsAcceptor::from(Arc::new(config));
             let listener = TcpListener::bind(&addr)
                 .await
                 .expect("FATAL: Failed to bind to port or port is already in use");
             info!("Listening on {}...", addr);
-            serve(listener, app).await.expect("FATAL: Failed to serve");
+
+            serve(listener, app, acceptor).await
         }
         Commands::Reload => {
             let file_string = match read_to_string(cli.config) {
@@ -106,6 +133,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             };
+            // TODO: look into cross-platform solution
             let mut stream = match UnixStream::connect("/tmp/torii.sock").await {
                 Ok(s) => s,
                 Err(e) => {

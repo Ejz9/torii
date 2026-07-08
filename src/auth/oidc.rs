@@ -10,7 +10,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
@@ -158,8 +158,9 @@ pub async fn auth_callback(
 pub struct Claims {
     pub sub: String,
     pub exp: u64,
-    pub preferred_name: String,
+    pub preferred_name: Option<String>,
     pub name: String,
+    pub groups: Option<Vec<String>>,
 }
 
 #[instrument(skip(state, token), err)]
@@ -178,8 +179,8 @@ pub async fn validate_token(state: Arc<AppState>, token: &str) -> Result<Claims,
         key_wrapper = state.jwks_cache.get(&kid).await;
     }
     let key = key_wrapper.ok_or(Error::InvalidKeyId)?;
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.algorithms = vec![Algorithm::RS256, Algorithm::ES256];
+    let mut validation = Validation::new(header.alg);
+    validation.set_audience(&[state.config.oidc_client_id.clone()]);
     Ok(decode::<Claims>(&token, &key, &validation)?.claims)
 }
 
