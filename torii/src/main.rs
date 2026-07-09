@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod env;
 mod error;
+mod kekkai_manager;
 mod proxy;
 mod state;
 use axum::routing::any;
@@ -108,6 +109,17 @@ async fn main() {
                 .await
                 .expect("FATAL: Failed to bind to port or port is already in use");
             info!("Listening on {}...", addr);
+
+            let iface = "enp5s0";
+            #[cfg(feature = "ebpf")]
+            info!("Kekkai initalizing on {}...", iface);
+            let Ok(_bpf_guard) = kekkai_manager::init_ebpf(iface).await else {
+                error!("FATAL: Failed to initialize eBPF");
+                std::process::exit(1);
+            };
+
+            #[cfg(not(feature = "ebpf"))]
+            info!("Kekkai disabled");
 
             serve(listener, app, acceptor).await
         }

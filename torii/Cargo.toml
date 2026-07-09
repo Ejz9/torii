@@ -7,7 +7,8 @@ edition.workspace = true
 arc-swap = "1.9.1"
 aws-lc-rs = "1.17.0"
 axum = "0.8.9"
-aya.workspace = true
+aya = { workspace = true, optional = true }
+aya-log = { workspace = true, optional = true}
 clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15.7"
 hyper = "1.10.0"
@@ -34,10 +35,20 @@ url = "2.5.8"
 uuid = { version = "1.23.1", features = ["v4"] }
 webpki-roots = "1.0.8"
 x509-parser = "0.18.1"
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+libc = { workspace = true }
+keidai = { workspace = true }
+
+[build-dependencies]
+anyhow = { workspace = true, optional = true }
+aya-build = { workspace = true, optional = true }
+cargo_metadata = { workspace = true, optional = true }
 
 [features]
 default = []
-#ebpf = ["dep:aya"]
+ebpf = ["dep:aya", "dep:aya-log", "dep:anyhow", "dep:aya-build", "dep:cargo_metadata"]
 
 [profile.release]
 lto = true
