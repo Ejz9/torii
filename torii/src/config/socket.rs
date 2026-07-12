@@ -34,7 +34,7 @@ pub async fn start_config_listener(state: Arc<AppState>) {
                 };
                 state.dynamic_config.store(Arc::new(config));
                 if let Err(e) = state
-                    .tx
+                    .acme_tx
                     .send((individual_certs, wildcard_certs, custom_certs))
                     .await
                 {

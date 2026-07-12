@@ -8,6 +8,7 @@ keidai = { workspace = true }
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
+network-types = "0.2.0"
 
 [build-dependencies]
 which = { workspace = true }
@@ -16,4 +17,4 @@ which = { workspace = true }
 name = "kekkai"
 path = "src/main.rs"
 
-# build: cargo +nightlty build -p kekkai -Z build-std=core --target bpfel-unknown-none --release
+# build: cargo +nightly build -p kekkai -Z build-std=core --target bpfel-unknown-none --release

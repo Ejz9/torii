@@ -5,6 +5,7 @@ use std::env::var;
 use std::net::Ipv4Addr;
 #[derive(Debug)]
 pub struct Config {
+    pub interface: Option<String>,
     pub port: u16,
     pub host: Ipv4Addr,
     pub timeout_seconds: u64,
@@ -22,6 +23,7 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Result<Self, Error> {
+        let interface = var("INTERFACE").ok();
         let port = var("PORT").unwrap_or_else(|_| "443".to_string()).parse()?;
         let host = var("HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())
@@ -61,6 +63,7 @@ impl Config {
         };
         let ddns = var("DDNS").map(|v| v == "true").unwrap_or(false);
         Ok(Config {
+            interface,
             port,
             host,
             timeout_seconds,

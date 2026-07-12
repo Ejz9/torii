@@ -1,9 +1,9 @@
 mod acme;
 mod auth;
 mod config;
+mod ebpf;
 mod env;
 mod error;
-mod kekkai_manager;
 mod proxy;
 mod state;
 use axum::routing::any;
@@ -22,6 +22,8 @@ use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
 use crate::config::socket;
 use crate::config::structs::ToriiConfig;
+use crate::ebpf::kekkai_manager;
+use crate::ebpf::kekkai_manager::EbpfEntry;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
@@ -40,7 +42,8 @@ async fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("Setting default subscriber failed");
+    tracing_log::LogTracer::init().expect("Failed to initialize log tracer");
     /* Clean panics for deployment
     std::panic::set_hook(Box::new(|panic_info| {
         let payload = panic_info.payload().downcast_ref::<&str>().unwrap_or(&"unknown panic");
@@ -67,18 +70,24 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let (tx, rx) = mpsc::channel::<(
+            let (kekkai_tx, kekkai_rx) = mpsc::channel::<EbpfEntry>(1024);
+            let (acme_tx, acme_rx) = mpsc::channel::<(
                 HashSet<String>,
                 HashSet<String>,
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
             let state = Arc::new(
-                AppState::new(config, cli.config, tx)
+                AppState::new(config, cli.config, acme_tx, kekkai_tx)
                     .await
                     .expect("Failed to build state"),
             );
+            let Some(interface) = state.config.interface.clone() else {
+                error!("Interface not defined in .env");
+                std::process::exit(1);
+            };
+            tokio::spawn(kekkai_manager::start_ebpf_worker(kekkai_rx, interface));
             tokio::spawn(socket::start_config_listener(state.clone()));
-            tokio::spawn(dns::start_acme_worker(state.clone(), rx));
+            tokio::spawn(dns::start_acme_worker(state.clone(), acme_rx));
             if state.config.ddns {
                 tokio::spawn(ddns::start_ddns_worker(state.clone()));
             }
@@ -109,17 +118,6 @@ async fn main() {
                 .await
                 .expect("FATAL: Failed to bind to port or port is already in use");
             info!("Listening on {}...", addr);
-
-            let iface = "enp5s0";
-            #[cfg(feature = "ebpf")]
-            info!("Kekkai initalizing on {}...", iface);
-            let Ok(_bpf_guard) = kekkai_manager::init_ebpf(iface).await else {
-                error!("FATAL: Failed to initialize eBPF");
-                std::process::exit(1);
-            };
-
-            #[cfg(not(feature = "ebpf"))]
-            info!("Kekkai disabled");
 
             serve(listener, app, acceptor).await
         }
