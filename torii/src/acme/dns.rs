@@ -21,7 +21,7 @@ use tracing::{error, info};
 
 use crate::{error::Error, state::AppState};
 
-pub async fn start_acme_worker(
+pub async fn acme_worker(
     state: Arc<AppState>,
     mut rx: tokio::sync::mpsc::Receiver<(
         HashSet<String>,

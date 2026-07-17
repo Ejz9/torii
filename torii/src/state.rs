@@ -76,7 +76,7 @@ impl AppState {
             HashSet<String>,
             HashMap<String, Arc<CertifiedKey>>,
         )>,
-        kekkai_tx: mpsc::Sender<EbpfEntry>
+        kekkai_tx: mpsc::Sender<EbpfEntry>,
     ) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await

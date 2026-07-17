@@ -5,7 +5,7 @@ use tracing::error;
 
 use crate::state::AppState;
 
-pub async fn start_ddns_worker(state: Arc<AppState>) {
+pub async fn run(state: Arc<AppState>) {
     let mut last_known_ip: Option<std::net::IpAddr> = None;
     let mut cached_record_id: Option<String> = None;
     let mut failed_attempts = 0;

@@ -6,11 +6,13 @@ use core::mem;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{lpm_trie::{LpmTrie, Key}, LruHashMap, PerCpuArray},
+    maps::{
+        LruHashMap, PerCpuArray,
+        lpm_trie::{Key, LpmTrie},
+    },
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
-use keidai::{Ipv4Prefix, Ipv6Prefix};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
@@ -19,9 +21,9 @@ use network_types::{
 };
 
 #[map]
-static CROWDSEC_V4: LpmTrie<u32, u8> = LpmTrie::with_max_entries(250_000, 0);
+static MIHARI_V4: LpmTrie<u32, u8> = LpmTrie::with_max_entries(250_000, 0);
 #[map]
-static CROWDSEC_V6: LpmTrie<[u8; 16], u8> = LpmTrie::with_max_entries(250_000, 0);
+static MIHARI_V6: LpmTrie<[u8; 16], u8> = LpmTrie::with_max_entries(250_000, 0);
 
 #[map]
 static BLOCKLIST_V4: LruHashMap<u32, u8> = LruHashMap::with_max_entries(125_000, 0);
@@ -66,14 +68,14 @@ fn block_ipv4(address: u32) -> bool {
 }
 fn block_ipv4_prefix(address: u32) -> bool {
     let key = Key::new(32, address);
-    unsafe { BLOCKLIST_V4_PREFIX.get(&key).is_some() || CROWDSEC_V4.get(&key).is_some() }
+    BLOCKLIST_V4_PREFIX.get(&key).is_some() || MIHARI_V4.get(&key).is_some()
 }
 fn block_ipv6(address: &[u8; 16]) -> bool {
     unsafe { BLOCKLIST_V6.get(address).is_some() }
 }
 fn block_ipv6_prefix(address: &[u8; 16]) -> bool {
     let key = Key::new(128, *address);
-    unsafe { BLOCKLIST_V6_PREFIX.get(&key).is_some() || CROWDSEC_V6.get(&key).is_some() }
+    BLOCKLIST_V6_PREFIX.get(&key).is_some() || MIHARI_V6.get(&key).is_some()
 }
 
 fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
