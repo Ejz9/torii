@@ -67,7 +67,9 @@ impl Config {
                 )));
             }
         };
-        let ddns = var("DDNS").map(|v| v.parse::<bool>().unwrap_or(true)).unwrap_or(false);
+        let ddns = var("DDNS")
+            .map(|v| v.parse::<bool>().unwrap_or(true))
+            .unwrap_or(false);
         let mihari_interval = var("MIHARI_INTERVAL")
             .unwrap_or_else(|_| "86400".to_string())
             .parse()?;
@@ -86,9 +88,11 @@ impl Config {
             Some(unkown) => return Err(Error::Env(format!("Invalid MIHARI provider: {}", unkown))),
             None => None,
         };
-        let disk_persistence = var("DISK_PERSISTENCE").map(|v| v.parse::<bool>().unwrap_or(true)).unwrap_or(true);
-        let kekkai_path = var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
-
+        let disk_persistence = var("DISK_PERSISTENCE")
+            .map(|v| v.parse::<bool>().unwrap_or(true))
+            .unwrap_or(true);
+        let kekkai_path =
+            var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
 
         Ok(Config {
             interface,

@@ -64,7 +64,7 @@ pub enum Error {
     #[error(transparent)]
     Tempfile(#[from] tempfile::PersistError),
     #[error("Invalid Prefix: {0}")]
-    InvalidPrefix(String)
+    InvalidPrefix(String),
 }
 
 impl IntoResponse for Error {

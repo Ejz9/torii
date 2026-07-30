@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::read_to_string;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::fs::read_to_string;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
 use crate::config::structs::ActiveState;
-use crate::ebpf::kekkai_manager::EbpfEntry;
+use crate::ebpf::hashira::EbpfEntry;
 use crate::env::Config;
 use crate::error::Error;
 use arc_swap::ArcSwap;
@@ -102,7 +102,7 @@ impl AppState {
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(15))
             .build();
-        let configuration_file = read_to_string(config_path)?;
+        let configuration_file = read_to_string(config_path).await?;
         let configuration_parsed = from_str(&configuration_file)?;
         let mut cert_store = RootCertStore::empty();
         cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());

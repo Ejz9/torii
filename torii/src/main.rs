@@ -22,12 +22,8 @@ use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
 use crate::config::cli::{Cli, Commands};
 use crate::config::socket;
 use crate::config::structs::ToriiConfig;
-use crate::ebpf::hashira;
-use crate::ebpf::kekkai_manager::CrowdsecEntry;
-use crate::ebpf::kekkai_manager::EbpfEntry;
-use crate::ebpf::kekkai_manager::Ipv4Prefix;
-use crate::ebpf::kekkai_manager::Ipv6Prefix;
-use crate::ebpf::{kekkai_manager, mihari};
+use crate::ebpf::hashira::EbpfEntry;
+use crate::ebpf::kekkai_manager;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
@@ -80,7 +76,7 @@ async fn main() {
                 HashSet<String>,
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
-            let (mihari_tx, mihari_rx) = mpsc::channel::<CrowdsecEntry>(100);
+            let (mihari_tx, mihari_rx) = mpsc::channel::<String>(100);
             let state = Arc::new(
                 AppState::new(config, cli.config, acme_tx, kekkai_tx)
                     .await
@@ -90,13 +86,14 @@ async fn main() {
                 error!("Interface not defined in .env");
                 std::process::exit(1);
             };
-            tokio::spawn(kekkai::run(
-                kekkai_rx, mihari_rx, interface,
+            tokio::spawn(kekkai_manager::run(
+                state.clone(),
+                kekkai_rx,
+                mihari_rx,
+                interface,
             ));
-            tokio::spawn(mihari::run(state.clone(), mihari_tx));
             tokio::spawn(socket::config_listener(state.clone()));
             tokio::spawn(dns::acme_worker(state.clone(), acme_rx));
-            tokio::spawn(hashira::run(state.clone()));
             if state.config.ddns {
                 tokio::spawn(ddns::run(state.clone()));
             }
@@ -179,6 +176,5 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::
     }
 }
