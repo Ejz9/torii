@@ -41,6 +41,9 @@ log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 keidai = { workspace = true, features = ["user"]}
+zerocopy = { version = "0.8.55", features = ["derive"] }
+memmap2 = "0.9.11"
+tempfile = "3.27.0"
 
 [build-dependencies]
 anyhow = { workspace = true, optional = true }
@@ -50,9 +53,3 @@ cargo_metadata = { workspace = true, optional = true }
 [features]
 default = []
 ebpf = ["dep:aya", "dep:aya-log", "dep:anyhow", "dep:aya-build", "dep:cargo_metadata"]
-
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"

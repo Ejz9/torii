@@ -1,34 +1,39 @@
 use std::{
-    collections::HashSet,
     fmt::Display,
+    fs::File,
+    io::Write,
     net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
+    str::FromStr,
+    sync::Arc,
 };
 
+use memmap2::Mmap;
 use tracing::{error, info};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
-pub enum EbpfEntry {
-    InsertIpv4(u32),
-    DeleteIpv4(u32),
-    InsertIpv6Addr([u8; 16]),
-    DeleteIpv6Addr([u8; 16]),
-    InsertBulkIpv4Prefix(HashSet<Ipv4Prefix>),
-    DeleteBulkIpv4Prefix(HashSet<Ipv4Prefix>),
-    InsertBulkIpv6Prefix(HashSet<Ipv6Prefix>),
-    DeleteBulkIpv6Prefix(HashSet<Ipv6Prefix>),
-}
+use crate::{
+    ebpf::{
+        hashira::{self, EbpfEntry},
+        metrics, mihari,
+    },
+    error::Error,
+    state::AppState,
+};
 
-pub enum MihariEntry {
-    UpdateIpv4(HashSet<Ipv4Prefix>, HashSet<Ipv4Prefix>),
-    UpdateIpv6(HashSet<Ipv6Prefix>, HashSet<Ipv6Prefix>),
-}
-
-#[derive(Copy, Clone)] //may need Hash, Eq, PartialEq for both structs
+#[repr(C)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, IntoBytes, FromBytes, Immutable, KnownLayout, Ord, PartialOrd,
+)]
 pub struct Ipv4Prefix {
     pub prefix_len: u32,
     pub addr: u32,
 }
 
-#[derive(Copy, Clone)]
+#[repr(C)]
+#[derive(
+    Copy, Clone, Eq, PartialEq, IntoBytes, FromBytes, Immutable, KnownLayout, Ord, PartialOrd,
+)]
 pub struct Ipv6Prefix {
     pub prefix_len: u32,
     pub addr: [u8; 16],
@@ -46,61 +51,136 @@ impl Display for Ipv6Prefix {
     }
 }
 
+impl FromStr for Ipv4Prefix {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((addr, prefix_len)) = s.split_once('/') {
+            let prefix_len = prefix_len.parse::<u32>()?;
+            let addr = addr.parse::<Ipv4Addr>()?;
+            if prefix_len > 32 || prefix_len < 8 {
+                return Err(Error::InvalidPrefix(s.to_string()));
+            }
+            return Ok(Self {
+                prefix_len,
+                addr: addr.into(),
+            });
+        }
+        if let Some(addr) = s.parse::<Ipv4Addr>().ok() {
+            return Ok(Self {
+                prefix_len: 32,
+                addr: addr.into(),
+            });
+        }
+        Err(Error::InvalidPrefix(s.to_string()))
+    }
+}
+
+impl FromStr for Ipv6Prefix {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some((addr, prefix_len)) = s.split_once('/') {
+            let prefix_len = prefix_len.parse::<u32>()?;
+            let addr = addr.parse::<Ipv6Addr>()?;
+            if prefix_len > 128 || prefix_len < 19 {
+                return Err(Error::InvalidPrefix(s.to_string()));
+            }
+            return Ok(Self {
+                prefix_len,
+                addr: addr.octets(),
+            });
+        }
+        if let Some(addr) = s.parse::<Ipv6Addr>().ok() {
+            return Ok(Self {
+                prefix_len: 128,
+                addr: addr.octets(),
+            });
+        }
+        Err(Error::InvalidPrefix(s.to_string()))
+    }
+}
+
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
-pub async fn start_ebpf_worker(
-    mut kekkai_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
-    mut mihari_rx: tokio::sync::mpsc::Receiver<MihariEntry>,
-    interface: String,
-) {
-    use aya::maps::{
-        HashMap, PerCpuArray, PerCpuValues,
-        lpm_trie::{Key, LpmTrie},
+#[macro_export]
+macro_rules! insert_single {
+    ($map:expr, $count:expr, $limit:expr, $item:expr, $dropped:expr, $map_name:expr) => {
+        if $count >= $limit {
+            $dropped += 1;
+        } else {
+            let key = aya::maps::lpm_trie::Key::new($item.prefix_len, $item.addr);
+            if let Err(e) = $map.insert(&key, 1, 0) {
+                error!("Failed to insert prefix into {}: {e}", $map_name);
+            } else {
+                $count += 1;
+            }
+        }
     };
-    macro_rules! insert_bulk {
-        ($map:expr, $count:expr, $limit:expr, $items:expr, $map_name:expr) => {
-            let mut dropped = 0;
-            for item in $items {
-                if $count >= $limit {
-                    dropped += 1;
+}
+
+#[macro_export]
+macro_rules! delete_single {
+    ($map:expr, $count:expr, $item:expr, $map_name:expr) => {
+        let key = aya::maps::lpm_trie::Key::new($item.prefix_len, $item.addr);
+        if let Err(e) = $map.remove(&key) {
+            if let aya::maps::MapError::SyscallError(sys_error) = &e {
+                if sys_error.io_error.raw_os_error() == Some(libc::ENOENT) {
                     continue;
                 }
-                let key = Key::new(item.prefix_len, item.addr);
-                if let Err(e) = $map.insert(&key, 1, 0) {
-                    error!("Failed to insert prefix into {}: {e}", $map_name);
-                } else {
-                    $count += 1;
-                }
-            }
-            if dropped > 0 {
+            } else {
                 error!(
-                    "FIREWALL DEGRADED: {} capacity reached! {} prefixes dropped.",
-                    $map_name, dropped
+                    "CRITICAL: Failed to remove IP from {} for abnormal reason: {e}",
+                    $map_name
                 );
             }
-        };
-    }
-    macro_rules! delete_bulk {
-        ($map:expr, $count:expr, $items:expr, $map_name:expr) => {
-            for item in $items {
-                let key = Key::new(item.prefix_len, item.addr);
-                if let Err(e) = $map.remove(&key) {
-                    if let aya::maps::MapError::SyscallError(sys_error) = &e {
-                        if sys_error.io_error.raw_os_error() == Some(libc::ENOENT) {
-                            continue;
-                        }
-                    }
-                    error!(
-                        "CRITICAL: Failed to remove IP from {} for abnormal reason: {e}",
-                        $map_name
-                    );
-                } else {
-                    $count = $count.saturating_sub(1);
-                }
-            }
-        };
-    }
+        } else {
+            $count = $count.saturating_sub(1);
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! insert_bulk {
+    ($map:expr, $count:expr, $limit:expr, $items:expr, $map_name:expr) => {
+        let mut dropped = 0;
+        for item in $items {
+            insert_single!($map, $count, $limit, item, dropped, $map_name);
+        }
+        if dropped > 0 {
+            error!(
+                "FIREWALL DEGRADED: {} capacity reached! {} prefixes dropped.",
+                $map_name, dropped
+            );
+        }
+    };
+}
+
+pub fn save_sets_to_disk<T: IntoBytes + Immutable, P: AsRef<Path>>(
+    slice: &[T],
+    path: P,
+) -> Result<(), Error> {
+    let path = path.as_ref();
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::Builder::new()
+        .prefix(".torii_tmp_")
+        .tempfile_in(parent)?;
+    file.write_all(slice.as_bytes())?;
+    file.persist(path)?;
+    Ok(())
+}
+
+pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
+    let file = File::open(path)?;
+    Ok(unsafe { Mmap::map(&file)? })
+}
+
+pub async fn run(
+    state: Arc<AppState>,
+    kekkai_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
+    mihari_rx: tokio::sync::mpsc::Receiver<String>,
+    interface: String,
+) {
+    use aya::maps::{HashMap, PerCpuArray, lpm_trie::LpmTrie};
     info!("Kekkai initalizing on {}...", interface);
     let Ok(mut ebpf_guard) = init_ebpf(&interface).await else {
         error!("FATAL: Failed to initialize eBPF");
@@ -164,98 +244,23 @@ pub async fn start_ebpf_worker(
         error!("FATAL: Failed to extract eBPF map METRICS from memory");
         std::process::exit(1);
     };
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-    let Ok(nr_cpus) = aya::util::nr_cpus() else {
-        error!("FATAL: Failed to get number of CPUs");
-        std::process::exit(1);
-    };
-    let mut ipv4_prefix_count: u32 = 0;
-    let mut ipv6_prefix_count: u32 = 0;
-    let mut mihari_ipv4_count: u32 = 0;
-    let mut mihari_ipv6_count: u32 = 0;
-    loop {
-        tokio::select! {
-            biased;
-            Some(entry) = kekkai_rx.recv() => {
-                match entry {
-                    EbpfEntry::InsertIpv4(addr) => {
-                        if let Err(e) = blocklist_v4.insert(addr, 1, 0) {
-                            error!("Failed to insert IPv4 address into BLOCKLIST_V4: {e}")
-                        }
-                    }
-                    EbpfEntry::InsertIpv6Addr(addr) => {
-                        if let Err(e) = blocklist_v6.insert(addr, 1, 0) {
-                            error!("Failed to insert IPv6 address into BLOCKLIST_V6: {e}")
-                        }
-                    }
-                    EbpfEntry::DeleteIpv4(addr) => {
-                        if let Err(e) = blocklist_v4.remove(&addr) {
-                            error!("Failed to remove IPv4 address from BLOCKLIST_V4: {e}")
-                        }
-                    }
-                    EbpfEntry::DeleteIpv6Addr(addr) => {
-                        if let Err(e) = blocklist_v6.remove(&addr) {
-                            error!("Failed to remove IPv6 address from BLOCKLIST_V6: {e}")
-                        }
-                    }
-                    EbpfEntry::InsertBulkIpv4Prefix(prefixes) => {
-                        insert_bulk!(blocklist_v4_prefix, ipv4_prefix_count, 125_000, prefixes, "BLOCKLIST_V4_PREFIX");
-                    }
-                    EbpfEntry::InsertBulkIpv6Prefix(prefixes) => {
-                        insert_bulk!(blocklist_v6_prefix, ipv6_prefix_count, 125_000, prefixes, "BLOCKLIST_V6_PREFIX");
-                    }
-                    EbpfEntry::DeleteBulkIpv4Prefix(prefixes) => {
-                        delete_bulk!(blocklist_v4_prefix, ipv4_prefix_count, prefixes, "BLOCKLIST_V4_PREFIX");
-                    }
-                    EbpfEntry::DeleteBulkIpv6Prefix(prefixes) => {
-                        delete_bulk!(blocklist_v6_prefix, ipv6_prefix_count, prefixes, "BLOCKLIST_V6_PREFIX");
-                    }
-                }
-            }
-
-            _ = interval.tick() => {
-                let Ok(passed_raw) = metrics.get(&0, 0) else {
-                    error!("Failed to get pass metrics");
-                    continue
-                };
-                let Ok(dropped_raw) = metrics.get(&1, 0) else {
-                    error!("Failed to get drop metrics");
-                    continue
-                };
-                let passed_total: u64 = passed_raw.iter().copied().sum();
-                let dropped_total: u64 = dropped_raw.iter().copied().sum();
-                if passed_total > 0 || dropped_total > 0 {
-                    info!("Traffic last minute: {passed_total} passed, {dropped_total} dropped");
-                }
-                let Ok(zero_passes) = PerCpuValues::try_from(vec![0u64; nr_cpus]) else {
-                    error!("Failed to zero pass metrics");
-                    continue
-                };
-                if let Err(e) = metrics.set(0, zero_passes, 0) {
-                    error!("Failed to reset pass metrics: {e}")
-                }
-                let Ok(zero_drops) = PerCpuValues::try_from(vec![0u64; nr_cpus]) else {
-                    error!("Failed to zero drop metrics");
-                    continue
-                };
-                if let Err(e) = metrics.set(1, zero_drops, 0) {
-                    error!("Failed to reset drop metrics: {e}")
-                }
-            }
-
-            Some(diffs) = mihari_rx.recv() => {
-                match diffs {
-                    MihariEntry::UpdateIpv4(add, remove) => {
-                        delete_bulk!(mihari_v4, mihari_ipv4_count, remove, "MIHARI_V4");
-                        insert_bulk!(mihari_v4, mihari_ipv4_count, 250_000, add, "MIHARI_V4");
-                    }
-                    MihariEntry::UpdateIpv6(add, remove) => {
-                        delete_bulk!(mihari_v6, mihari_ipv6_count, remove, "MIHARI_V6");
-                        insert_bulk!(mihari_v6, mihari_ipv6_count, 250_000, add, "MIHARI_V6");
-                    }
-                }
-            }
-        }
+    tokio::spawn(metrics::run(metrics));
+    tokio::spawn(hashira::run(
+        blocklist_v4,
+        blocklist_v6,
+        blocklist_v4_prefix,
+        blocklist_v6_prefix,
+        kekkai_rx,
+    ));
+    if let Some(mihari_provider) = &state.config.mihari_provider {
+        tokio::spawn(mihari::run(
+            mihari_provider.clone(),
+            state.config.mihari_interval,
+            state.config.kekkai_path.clone(),
+            mihari_v4,
+            mihari_v6,
+            mihari_rx,
+        ));
     }
     #[cfg(not(feature = "ebpf"))]
     info!("Kekkai disabled");
