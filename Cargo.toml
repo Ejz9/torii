@@ -32,3 +32,9 @@ keidai = { path = "keidai" }
 debug = 2
 codegen-units = 1
 strip = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -84,41 +84,30 @@ fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
         Ok(EtherType::Ipv4) => {
             let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
             let source_addr = u32::from_be_bytes(unsafe { (*ipv4hdr).src_addr });
-            let action = if block_ipv4(source_addr) || block_ipv4_prefix(source_addr) {
-                info!(&ctx, "XDP_DROP: {:i}", source_addr);
-                record_metric(1);
-                xdp_action::XDP_DROP
-            } else {
-                record_metric(0);
-                xdp_action::XDP_PASS
-            };
-            let proto =
-                unsafe { (*ipv4hdr).proto() }.map_err(|IpError::InvalidProto(_proto)| ())?;
-            let _source_port = match proto {
-                IpProto::Tcp => {
-                    let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-                    u16::from_be_bytes(unsafe { (*tcphdr).source })
-                }
-                IpProto::Udp => {
-                    let udphdr: *const UdpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-                    unsafe { (*udphdr).src_port() }
-                }
-                _ => return Err(()),
-            };
-            Ok(action)
+            Ok(
+                if block_ipv4(source_addr) || block_ipv4_prefix(source_addr) {
+                    info!(&ctx, "XDP_DROP: {:i}", source_addr);
+                    record_metric(1);
+                    xdp_action::XDP_DROP
+                } else {
+                    record_metric(0);
+                    xdp_action::XDP_PASS
+                },
+            )
         }
         Ok(EtherType::Ipv6) => {
             let ipv6hdr: *const Ipv6Hdr = ptr_at(&ctx, EthHdr::LEN)?;
             let source_addr = unsafe { (*ipv6hdr).src_addr };
-            let action = if block_ipv6(&source_addr) || block_ipv6_prefix(&source_addr) {
-                info!(&ctx, "XDP_DROP: {:i}", source_addr);
-                record_metric(1);
-                xdp_action::XDP_DROP
-            } else {
-                record_metric(0);
-                xdp_action::XDP_PASS
-            };
-            Ok(action)
+            Ok(
+                if block_ipv6(&source_addr) || block_ipv6_prefix(&source_addr) {
+                    info!(&ctx, "XDP_DROP: {:i}", source_addr);
+                    record_metric(1);
+                    xdp_action::XDP_DROP
+                } else {
+                    record_metric(0);
+                    xdp_action::XDP_PASS
+                },
+            )
         }
         _ => return Ok(xdp_action::XDP_PASS),
     }
