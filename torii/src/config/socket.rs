@@ -11,7 +11,7 @@ use crate::{config::structs::ActiveState, state::AppState};
 pub async fn config_listener(state: Arc<AppState>) {
     std::fs::remove_file("/tmp/torii.sock").ok();
     let Ok(listener) = UnixListener::bind("/tmp/torii.sock") else {
-        error!("FATAL: Failed to create socket, does it already exist?");
+        error!("FATAL: Failed to create config socket, does it already exist?");
         std::process::exit(1)
     };
     loop {

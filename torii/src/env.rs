@@ -25,6 +25,7 @@ pub struct Config {
     pub mihari_provider: Option<MihariProviderKind>,
     pub disk_persistence: bool,
     pub kekkai_path: String,
+    pub hashira_shm_capacity: u32,
 }
 
 impl Config {
@@ -72,7 +73,7 @@ impl Config {
             .unwrap_or(false);
         let mihari_interval = var("MIHARI_INTERVAL")
             .unwrap_or_else(|_| "86400".to_string())
-            .parse()?;
+            .parse::<u64>()?;
         let mihari_provider_string = var("MIHARI_PROVIDER").ok();
         let mihari_provider = match mihari_provider_string {
             Some(provider) if provider.to_lowercase() == "crowdsec" => {
@@ -93,7 +94,9 @@ impl Config {
             .unwrap_or(true);
         let kekkai_path =
             var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
-
+        let hashira_shm_capacity = var("HASHIRA_SHM_CAPACITY")
+            .unwrap_or_else(|_| "100000".to_string())
+            .parse::<u32>()?;
         Ok(Config {
             interface,
             port,
@@ -113,6 +116,7 @@ impl Config {
             mihari_provider,
             disk_persistence,
             kekkai_path,
+            hashira_shm_capacity,
         })
     }
 }

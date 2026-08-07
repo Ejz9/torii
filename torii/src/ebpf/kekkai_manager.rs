@@ -245,7 +245,14 @@ pub async fn run(
         std::process::exit(1);
     };
     tokio::spawn(metrics::run(metrics));
+    if state.remote_sidecars {
+        let addr = format!(
+            "{}:{}",
+            state.config.host, state.config.sidecar_listener_port
+        );
+    }
     tokio::spawn(hashira::run(
+        state.config.hashira_shm_capacity,
         blocklist_v4,
         blocklist_v6,
         blocklist_v4_prefix,

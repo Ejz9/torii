@@ -8,7 +8,7 @@ arc-swap = "1.9.1"
 aws-lc-rs = "1.17.0"
 axum = "0.8.9"
 aya = { workspace = true, optional = true }
-aya-log = { workspace = true, optional = true}
+aya-log = { workspace = true, optional = true }
 clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15.7"
 hyper = "1.10.0"
@@ -40,8 +40,8 @@ anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
-keidai = { workspace = true, features = ["user"]}
-zerocopy = { version = "0.8.55", features = ["derive"] }
+keidai = { workspace = true }
+zerocopy = { workspace = true }
 memmap2 = "0.9.11"
 tempfile = "3.27.0"
 
@@ -52,4 +52,10 @@ cargo_metadata = { workspace = true, optional = true }
 
 [features]
 default = []
-ebpf = ["dep:aya", "dep:aya-log", "dep:anyhow", "dep:aya-build", "dep:cargo_metadata"]
+ebpf = [
+    "dep:aya",
+    "dep:aya-log",
+    "dep:anyhow",
+    "dep:aya-build",
+    "dep:cargo_metadata",
+]
