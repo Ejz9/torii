@@ -8,6 +8,7 @@ mod proxy;
 mod state;
 use axum::routing::any;
 use clap::Parser;
+use moka::sync::Cache;
 use rustls::ServerConfig;
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
@@ -33,7 +34,9 @@ use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
 use std::fs::read_to_string;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixStream};
 
@@ -77,6 +80,11 @@ async fn main() {
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
             let (mihari_tx, mihari_rx) = mpsc::channel::<String>(100);
+            let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
+            let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(1))
+                .build();
             let state = Arc::new(
                 AppState::new(config, cli.config, acme_tx, kekkai_tx)
                     .await
@@ -90,6 +98,8 @@ async fn main() {
                 state.clone(),
                 kekkai_rx,
                 mihari_rx,
+                hashira_tx.clone(),
+                hashira_rx,
                 interface,
             ));
             tokio::spawn(socket::config_listener(state.clone()));
@@ -125,7 +135,7 @@ async fn main() {
                 .expect("FATAL: Failed to bind to port or port is already in use");
             info!("Listening on {}...", addr);
 
-            serve(listener, app, acceptor).await
+            serve(listener, app, acceptor, l4_rate_limiter, hashira_tx).await
         }
         Commands::Reload => {
             let file_string = match read_to_string(cli.config) {

@@ -33,7 +33,7 @@ pub struct AppState {
     pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
     pub limiter_cache: Cache<String, ()>,
-    pub dynamic_config: ArcSwap<ActiveState>,
+    pub dynamic_config: Arc<ArcSwap<ActiveState>>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub acme_tx: tokio::sync::mpsc::Sender<(
@@ -52,10 +52,12 @@ const DEFAULT_CONFIG_STRING: &str = r#"
 [security]
 # Determines if the proxy opts for wildcard certificates or individual certificates
 default_certificate_mode_wildcard = true
+# Paths an IP will be blocked for accessing
+forbidden_paths: ["../", "%2e%2e", "/.env", "/cgi-bin/", "${"]
 # The number of malicious requests before the kernel drops the IP at the NIC
 ebpf_strike_threshold = 10
 # How long (in seconds) the offending IP remains locked out
-ebpf_lockout_duration_secs = 3600
+ebpf_lockout_duration_secs = 300
 
 [routes]
 # Routes are defined by their subdomain and path
@@ -146,7 +148,7 @@ impl AppState {
         let cert_verifier = WebPkiServerVerifier::builder(root_store).build()?;
         let (configuration, individual_certs, wildcard_certs, certs) =
             ActiveState::build(configuration_parsed, &cert_verifier)?;
-        let dynamic_config = ArcSwap::from_pointee(configuration);
+        let dynamic_config = Arc::new(ArcSwap::from_pointee(configuration));
         if let Err(e) = acme_tx
             .send((individual_certs, wildcard_certs, certs.clone()))
             .await

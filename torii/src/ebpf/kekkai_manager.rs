@@ -178,6 +178,8 @@ pub async fn run(
     state: Arc<AppState>,
     kekkai_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     mihari_rx: tokio::sync::mpsc::Receiver<String>,
+    hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
+    hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,
 ) {
     use aya::maps::{HashMap, PerCpuArray, lpm_trie::LpmTrie};
@@ -245,19 +247,26 @@ pub async fn run(
         std::process::exit(1);
     };
     tokio::spawn(metrics::run(metrics));
+    /*
     if state.remote_sidecars {
         let addr = format!(
             "{}:{}",
             state.config.host, state.config.sidecar_listener_port
         );
     }
+    */
     tokio::spawn(hashira::run(
         state.config.hashira_shm_capacity,
+        //state.config.remote_sidecars,
+        //addr,
+        Arc::clone(&state.dynamic_config),
         blocklist_v4,
         blocklist_v6,
         blocklist_v4_prefix,
         blocklist_v6_prefix,
         kekkai_rx,
+        hashira_tx,
+        hashira_rx
     ));
     if let Some(mihari_provider) = &state.config.mihari_provider {
         tokio::spawn(mihari::run(

@@ -1,15 +1,18 @@
 use arc_swap::ArcSwap;
 use axum::Router;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
+use moka::sync::Cache;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use std::{collections::HashMap, sync::Arc};
-use tokio::net::TcpListener;
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::mpsc::Sender};
 use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use tracing::{debug, error};
+
+use crate::ebpf::hashira::EbpfEntry;
 
 #[derive(Debug)]
 pub struct CertificateResolver {
@@ -39,11 +42,33 @@ impl ResolvesServerCert for CertificateResolver {
     }
 }
 
-pub async fn serve(listner: TcpListener, routes: Router, acceptor: TlsAcceptor) {
+pub async fn serve(
+    listener: TcpListener,
+    routes: Router,
+    acceptor: TlsAcceptor,
+    l4_rate_limiter: Cache<IpAddr, u32>,
+    hashira_tx: Sender<EbpfEntry>,
+) {
     loop {
-        let Ok((tcp_stream, remote_addr)) = listner.accept().await else {
+        let Ok((tcp_stream, remote_addr)) = listener.accept().await else {
             continue;
         };
+
+        let connections = l4_rate_limiter.get_with(remote_addr.ip(), || 0) + 1;
+        l4_rate_limiter.insert(remote_addr.ip(), connections);
+
+        if connections > 50 {
+            match remote_addr.ip() {
+                IpAddr::V4(addr) => {
+                    let _ = hashira_tx.try_send(EbpfEntry::InsertIpv4(addr.into()));
+                }
+                IpAddr::V6(addr) => {
+                    let _ = hashira_tx.try_send(EbpfEntry::InsertIpv6Addr(addr.octets()));
+                }
+            }
+            continue;
+        }
+
         let tls_acceptor = acceptor.clone();
         let app = routes.clone();
 
@@ -57,10 +82,23 @@ pub async fn serve(listner: TcpListener, routes: Router, acceptor: TlsAcceptor) 
                         app.clone().call(req)
                     });
 
-                    if let Err(e) =
-                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                            .serve_connection_with_upgrades(io, service)
-                            .await
+                    let mut auto_builder =
+                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+
+                    auto_builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(Duration::from_secs(5))
+                        .keep_alive(true);
+                    auto_builder
+                        .http2()
+                        .timer(TokioTimer::new())
+                        .keep_alive_interval(Some(Duration::from_secs(15)))
+                        .max_concurrent_streams(100);
+
+                    if let Err(e) = auto_builder
+                        .serve_connection_with_upgrades(io, service)
+                        .await
                     {
                         handle_connection_error(e);
                     }
