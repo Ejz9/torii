@@ -4,8 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::read_to_string;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
-use crate::config::structs::ActiveState;
-use crate::ebpf::hashira::EbpfEntry;
+use crate::cli::config::ActiveState;
 use crate::env::Config;
 use crate::error::Error;
 use arc_swap::ArcSwap;
@@ -36,14 +35,8 @@ pub struct AppState {
     pub dynamic_config: Arc<ArcSwap<ActiveState>>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
-    pub acme_tx: tokio::sync::mpsc::Sender<(
-        HashSet<String>,
-        HashSet<String>,
-        HashMap<String, Arc<CertifiedKey>>,
-    )>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
-    pub kekkai_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -78,7 +71,6 @@ impl AppState {
             HashSet<String>,
             HashMap<String, Arc<CertifiedKey>>,
         )>,
-        kekkai_tx: mpsc::Sender<EbpfEntry>,
     ) -> Result<Self, Error> {
         let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
             .await
@@ -193,10 +185,8 @@ impl AppState {
             dynamic_config,
             connection_pool,
             insecure_connection_pool,
-            acme_tx,
             cert_verifier,
             certificates,
-            kekkai_tx,
         })
     }
 }

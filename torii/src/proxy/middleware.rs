@@ -10,7 +10,6 @@ use axum::http::header;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
-use tracing::instrument;
 use url::form_urlencoded;
 
 fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {

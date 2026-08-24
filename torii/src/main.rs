@@ -1,16 +1,18 @@
 mod acme;
 mod auth;
-mod config;
+mod cli;
 mod ebpf;
 mod env;
 mod error;
 mod proxy;
 mod state;
+use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
 use moka::sync::Cache;
 use rustls::ServerConfig;
 use rustls::sign::CertifiedKey;
+use tokio::fs::read_to_string;
 use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use toml::from_str;
@@ -20,9 +22,12 @@ use tracing_subscriber::FmtSubscriber;
 use crate::acme::ddns;
 use crate::acme::dns;
 use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
-use crate::config::cli::{Cli, Commands};
-use crate::config::socket;
-use crate::config::structs::ToriiConfig;
+use crate::cli::cli::{Cli, Commands};
+use crate::cli::config::ToriiConfig;
+use crate::cli::socket;
+use crate::cli::socket::SocketMessage;
+use crate::cli::socket::send_socket_message;
+use crate::cli::socket::validate_ips;
 use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
 use crate::env::Config;
@@ -33,15 +38,13 @@ use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
-use std::fs::read_to_string;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::TcpListener;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
@@ -73,20 +76,20 @@ async fn main() {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let (kekkai_tx, kekkai_rx) = mpsc::channel::<EbpfEntry>(1024);
+            let (ofuda_tx, ofuda_rx) = mpsc::channel::<EbpfEntry>(1024);
             let (acme_tx, acme_rx) = mpsc::channel::<(
                 HashSet<String>,
                 HashSet<String>,
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
             let (mihari_tx, mihari_rx) = mpsc::channel::<String>(100);
-            let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
+            let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
             let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
                 .max_capacity(100_000)
                 .time_to_live(Duration::from_secs(1))
                 .build();
             let state = Arc::new(
-                AppState::new(config, cli.config, acme_tx, kekkai_tx)
+                AppState::new(config, cli.config, acme_tx.clone())
                     .await
                     .expect("Failed to build state"),
             );
@@ -96,13 +99,17 @@ async fn main() {
             };
             tokio::spawn(kekkai_manager::run(
                 state.clone(),
-                kekkai_rx,
+                ofuda_rx,
                 mihari_rx,
                 hashira_tx.clone(),
                 hashira_rx,
                 interface,
             ));
-            tokio::spawn(socket::config_listener(state.clone()));
+            tokio::spawn(socket::config_listener(
+                Arc::clone(&state.dynamic_config),
+                Arc::clone(&state.cert_verifier),
+                acme_tx,
+            ));
             tokio::spawn(dns::acme_worker(state.clone(), acme_rx));
             if state.config.ddns {
                 tokio::spawn(ddns::run(state.clone()));
@@ -138,52 +145,39 @@ async fn main() {
             serve(listener, app, acceptor, l4_rate_limiter, hashira_tx).await
         }
         Commands::Reload => {
-            let file_string = match read_to_string(cli.config) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("FATAL: Failed to read config file: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let config: ToriiConfig = match from_str(&file_string) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("FATAL: Invalid configuration: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let config_bytes = match postcard::to_allocvec(&config) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("FATAL: Failed to serialize config: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let mut stream = match UnixStream::connect("/tmp/torii.sock").await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("FATAL: Failed to connect to socket: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            let Ok(_) = stream.write_all(&config_bytes).await else {
-                eprintln!("FATAL: Failed to write to socket");
+            let file_string = read_to_string(cli.config)
+                .await
+                .context("FATAL: Failed to read config file")?;
+            let config: ToriiConfig =
+                from_str(&file_string).context("FATAL: Invalid configuration")?;
+            send_socket_message(SocketMessage::ReloadConfig(config))
+                .await
+                .context("FATAL: Daemon rejected the configuration payload")?;
+            println!("Configruation reloaded!");
+        }
+        Commands::Bans(bans_args) => {
+            let invalid_add_entries = validate_ips(&bans_args.add);
+            let invalid_remove_entries = validate_ips(&bans_args.remove);
+            if invalid_add_entries || invalid_remove_entries {
+                eprintln!("FATAL: Invalid addresses present");
                 std::process::exit(1);
-            };
-            let response = match stream.read_u8().await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("FATAL: Daemon closed connection without confirming: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            if response == 1 {
-                println!("Configruation reloaded!");
-                std::process::exit(0);
+            }
+            send_socket_message(SocketMessage::UpdateBans(bans_args))
+                .await
+                .context("FATAL: Daemon rejected ban modifications")?;
+            println!("Bans Processed");
+        }
+        Commands::Threats { action } => {
+            let is_stop = action.eq_ignore_ascii_case("stop");
+            send_socket_message(SocketMessage::CommandMihari { action })
+                .await
+                .context("FATAL: Daemon failed to communicate with mihari worker thread")?;
+            if is_stop {
+                println!("Mihari threat worker stopped");
             } else {
-                eprintln!("FATAL: Daemon rejected the configuration payload.");
-                std::process::exit(1);
+                println!("Mhiari threat worker refreshed");
             }
         }
     }
+    std::process::exit(0);
 }
