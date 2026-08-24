@@ -15,7 +15,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::{
     ebpf::{
         hashira::{self, EbpfEntry},
-        metrics, mihari,
+        metrics, mihari, ofuda,
     },
     error::Error,
     state::AppState,
@@ -102,6 +102,24 @@ impl FromStr for Ipv6Prefix {
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
+pub enum IpPrefix {
+    V4(Ipv4Prefix),
+    V6(Ipv6Prefix),
+}
+
+impl FromStr for IpPrefix {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(v4) = s.parse::<Ipv4Prefix>() {
+            return Ok(IpPrefix::V4(v4));
+        }
+        if let Ok(v6) = s.parse::<Ipv6Prefix>() {
+            return Ok(IpPrefix::V6(v6));
+        }
+        Err(Error::InvalidPrefix(s.to_string()))
+    }
+}
+
 #[macro_export]
 macro_rules! insert_single {
     ($map:expr, $count:expr, $limit:expr, $item:expr, $dropped:expr, $map_name:expr) => {
@@ -176,7 +194,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 
 pub async fn run(
     state: Arc<AppState>,
-    kekkai_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
+    ofuda_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     mihari_rx: tokio::sync::mpsc::Receiver<String>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
@@ -262,12 +280,10 @@ pub async fn run(
         Arc::clone(&state.dynamic_config),
         blocklist_v4,
         blocklist_v6,
-        blocklist_v4_prefix,
-        blocklist_v6_prefix,
-        kekkai_rx,
         hashira_tx,
-        hashira_rx
+        hashira_rx,
     ));
+    tokio::spawn(ofuda::run(ofuda_rx, blocklist_v4_prefix, blocklist_v6_prefix));
     if let Some(mihari_provider) = &state.config.mihari_provider {
         tokio::spawn(mihari::run(
             mihari_provider.clone(),

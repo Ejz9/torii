@@ -1,3 +1,3 @@
 pub mod cli;
 pub mod socket;
-pub mod structs;
+pub mod config;

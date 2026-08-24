@@ -6,7 +6,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use aya::maps::{HashMap, LpmTrie, MapData};
+use aya::maps::{HashMap, MapData};
 use governor::{
     Quota, RateLimiter,
     clock::DefaultClock,
@@ -19,7 +19,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tracing::{error, warn};
 use zerocopy::FromBytes;
 
-use crate::config::structs::ActiveState;
+use crate::cli::config::ActiveState;
 
 const EVENT_BUDGET: u32 = 256;
 const EVENT_SIZE: usize = 288;
@@ -29,10 +29,6 @@ pub enum EbpfEntry {
     DeleteIpv4(u32),
     InsertIpv6Addr([u8; 16]),
     DeleteIpv6Addr([u8; 16]),
-    // InsertBulkIpv4Prefix(Vec<Ipv4Prefix>),
-    // DeleteBulkIpv4Prefix(Vec<Ipv4Prefix>),
-    //InsertBulkIpv6Prefix(Vec<Ipv6Prefix>),
-    //DeleteBulkIpv6Prefix(Vec<Ipv6Prefix>),
 }
 
 struct LocalSidecarHandle {
@@ -57,10 +53,7 @@ pub async fn run(
     mut dynamic_config: Arc<ArcSwap<ActiveState>>,
     mut blocklist_v4: HashMap<MapData, u32, u8>,
     mut blocklist_v6: HashMap<MapData, [u8; 16], u8>,
-    mut blocklist_v4_prefix: LpmTrie<MapData, u32, u8>,
-    mut blocklist_v6_prefix: LpmTrie<MapData, [u8; 16], u8>,
-    mut kekkai_rx: Receiver<EbpfEntry>,
-    mut hashira_tx: Sender<EbpfEntry>,
+    hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
 ) {
     let (shm_register_tx, mut shm_register_rx) =
@@ -395,41 +388,3 @@ fn check_method(method: &[u8]) -> u32 {
         _ => PENALTY_INSTANT,
     }
 }
-/*
-    Some(entry) = kekkai_rx.recv() => {
-    match entry {
-        EbpfEntry::InsertIpv4(addr) => {
-            if let Err(e) = blocklist_v4.insert(addr, 1, 0) {
-                error!("Failed to insert IPv4 address into BLOCKLIST_V4: {e}")
-            }
-        }
-        EbpfEntry::InsertIpv6Addr(addr) => {
-            if let Err(e) = blocklist_v6.insert(addr, 1, 0) {
-                error!("Failed to insert IPv6 address into BLOCKLIST_V6: {e}")
-            }
-        }
-        EbpfEntry::DeleteIpv4(addr) => {
-            if let Err(e) = blocklist_v4.remove(&addr) {
-                error!("Failed to remove IPv4 address from BLOCKLIST_V4: {e}")
-            }
-        }
-        EbpfEntry::DeleteIpv6Addr(addr) => {
-            if let Err(e) = blocklist_v6.remove(&addr) {
-                error!("Failed to remove IPv6 address from BLOCKLIST_V6: {e}")
-            }
-        }
-        EbpfEntry::InsertBulkIpv4Prefix(prefixes) => {
-            insert_bulk!(blocklist_v4_prefix, ipv4_prefix_count, 125_000, prefixes, "BLOCKLIST_V4_PREFIX");
-        }
-        EbpfEntry::InsertBulkIpv6Prefix(prefixes) => {
-            insert_bulk!(blocklist_v6_prefix, ipv6_prefix_count, 125_000, prefixes, "BLOCKLIST_V6_PREFIX");
-        }
-        EbpfEntry::DeleteBulkIpv4Prefix(prefixes) => {
-            delete_bulk!(blocklist_v4_prefix, ipv4_prefix_count, prefixes, "BLOCKLIST_V4_PREFIX");
-        }
-        EbpfEntry::DeleteBulkIpv6Prefix(prefixes) => {
-            delete_bulk!(blocklist_v6_prefix, ipv6_prefix_count, prefixes, "BLOCKLIST_V6_PREFIX");
-        }
-    }
-}
-*/
