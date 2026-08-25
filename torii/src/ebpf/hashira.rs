@@ -79,7 +79,7 @@ pub async fn run(
     };
     */
     std::thread::spawn(move || {
-        while let Ok(entry) = hashira_rx.try_recv() {
+        while let Some(entry) = hashira_rx.blocking_recv() {
             match entry {
                 EbpfEntry::InsertIpv4(addr) => {
                     if let Err(e) = blocklist_v4.insert(addr, 1, 0) {
