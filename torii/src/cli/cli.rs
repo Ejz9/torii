@@ -25,4 +25,14 @@ pub struct BansArgs {
     pub add: Vec<String>,
     #[arg(short = 'r', long = "remove", num_args = 1..)]
     pub remove: Vec<String>,
+    #[arg(short = 'l', long = "list", num_args = 0..=1, default_missing_value = "both")]
+    pub list: Option<IpFilter>,
+}
+
+#[derive(clap::ValueEnum, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum IpFilter {
+    V4,
+    V6,
+    Both,
 }

@@ -30,6 +30,7 @@ use crate::cli::socket::send_socket_message;
 use crate::cli::socket::validate_ips;
 use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
+use crate::ebpf::ofuda::OfudaEntry;
 use crate::env::Config;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
@@ -76,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
-            let (ofuda_tx, ofuda_rx) = mpsc::channel::<EbpfEntry>(1024);
+            let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
             let (acme_tx, acme_rx) = mpsc::channel::<(
                 HashSet<String>,
                 HashSet<String>,
@@ -109,6 +110,8 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&state.dynamic_config),
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
+                ofuda_tx,
+                state.config.kekkai_path.clone(),
             ));
             tokio::spawn(dns::acme_worker(state.clone(), acme_rx));
             if state.config.ddns {
@@ -156,16 +159,22 @@ async fn main() -> anyhow::Result<()> {
             println!("Configruation reloaded!");
         }
         Commands::Bans(bans_args) => {
-            let invalid_add_entries = validate_ips(&bans_args.add);
-            let invalid_remove_entries = validate_ips(&bans_args.remove);
-            if invalid_add_entries || invalid_remove_entries {
-                eprintln!("FATAL: Invalid addresses present");
-                std::process::exit(1);
+            if let Some(filter) = bans_args.list {
+                send_socket_message(SocketMessage::ListBans(filter))
+                    .await
+                    .context("FATAL: Daemon failed to retrieve ban list")?;
+            } else {
+                let invalid_add_entries = validate_ips(&bans_args.add);
+                let invalid_remove_entries = validate_ips(&bans_args.remove);
+                if invalid_add_entries || invalid_remove_entries {
+                    eprintln!("FATAL: Invalid addresses present");
+                    std::process::exit(1);
+                }
+                send_socket_message(SocketMessage::UpdateBans(bans_args))
+                    .await
+                    .context("FATAL: Daemon rejected ban modifications")?;
+                println!("Bans Processed");
             }
-            send_socket_message(SocketMessage::UpdateBans(bans_args))
-                .await
-                .context("FATAL: Daemon rejected ban modifications")?;
-            println!("Bans Processed");
         }
         Commands::Threats { action } => {
             let is_stop = action.eq_ignore_ascii_case("stop");

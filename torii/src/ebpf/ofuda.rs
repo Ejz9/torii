@@ -1,13 +1,16 @@
-use std::path::PathBuf;
+use std::{io::ErrorKind, path::PathBuf};
 
 use aya::maps::{LpmTrie, MapData};
 use tracing::error;
-use zerocopy::FromBytes;
+use zerocopy::{FromBytes, Immutable};
 
 use crate::{
-    cli::cli::BansArgs,
+    cli::cli::{BansArgs, IpFilter},
     delete_single,
-    ebpf::kekkai_manager::{IpPrefix, Ipv4Prefix, Ipv6Prefix, save_sets_to_disk},
+    ebpf::kekkai_manager::{
+        IpPrefix, Ipv4Prefix, Ipv6Prefix, load_sets_from_disk, save_sets_to_disk,
+    },
+    error::Error,
     insert_single, populate_map_from_disk,
 };
 
@@ -41,9 +44,9 @@ pub async fn run(
     mut rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
     mut ofuda_v4: LpmTrie<MapData, u32, u8>,
     mut ofuda_v6: LpmTrie<MapData, [u8; 16], u8>,
-    ofuda_path: String,
+    kekkai_path: String,
 ) {
-    let ofuda_path = PathBuf::from(ofuda_path);
+    let ofuda_path = PathBuf::from(kekkai_path);
 
     let path_v4 = ofuda_path.join("ofuda_v4.bin");
     let (mut ofuda_v4, mut ofuda_v4_entries) = populate_map_from_disk!(
@@ -160,9 +163,53 @@ pub async fn run(
             errors.push("Failed to sync updated bans to disk".to_string());
         }
         if errors.is_empty() {
-            entry.reply.send(Ok(()));
+            if let Err(e) = entry.reply.send(Ok(())) {
+                error!("Failed to reply success to CLI {:?}", e)
+            }
         } else {
-            entry.reply.send(Err(errors));
+            if let Err(e) = entry.reply.send(Err(errors)) {
+                error!("Failed to reply errors to CLI: {:?}", e)
+            }
+        }
+    }
+}
+
+pub async fn get_ofuda_list(filter: &IpFilter, ofuda_path: &str) -> Result<Vec<IpPrefix>, Error> {
+    let mut results: Vec<IpPrefix> = Vec::new();
+    let ofuda_path = PathBuf::from(ofuda_path);
+    if *filter == IpFilter::V4 || *filter == IpFilter::Both {
+        let path_v4 = ofuda_path.join("ofuda_v4.bin");
+        results.extend(fetch_bans(path_v4, "v4", IpPrefix::V4)?);
+    }
+    if *filter == IpFilter::V6 || *filter == IpFilter::Both {
+        let path_v6 = ofuda_path.join("ofuda_v6.bin");
+        results.extend(fetch_bans(path_v6, "v6", IpPrefix::V6)?);
+    }
+    Ok(results)
+}
+
+fn fetch_bans<T>(
+    path: PathBuf,
+    label: &str,
+    to_enum: fn(T) -> IpPrefix,
+) -> Result<Vec<IpPrefix>, Error>
+where
+    T: FromBytes + Immutable + Copy,
+{
+    match load_sets_from_disk(path) {
+        Ok(mmap) => {
+            let Ok(prefixes) = <[T]>::ref_from_bytes(&mmap) else {
+                return Err(Error::InvalidCustomSetup(format!(
+                    "Failed to cast {label} mmeory map"
+                )));
+            };
+            Ok(prefixes.iter().copied().map(to_enum).collect())
+        }
+        Err(Error::Io(e)) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => {
+            return Err(Error::InvalidCustomSetup(format!(
+                "Failed to load {label} list from disk {e}"
+            )));
         }
     }
 }

@@ -16,7 +16,8 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use crate::{
     ebpf::{
         hashira::{self, EbpfEntry},
-        metrics, mihari, ofuda,
+        metrics, mihari,
+        ofuda::{self, OfudaEntry},
     },
     error::Error,
     state::AppState,
@@ -129,6 +130,15 @@ unsafe impl aya::Pod for Ipv6Prefix {}
 pub enum IpPrefix {
     V4(Ipv4Prefix),
     V6(Ipv6Prefix),
+}
+
+impl Display for IpPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpPrefix::V4(v4) => write!(f, "{}", v4),
+            IpPrefix::V6(v6) => write!(f, "{}", v6),
+        }
+    }
 }
 
 impl FromStr for IpPrefix {
@@ -285,7 +295,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 
 pub async fn run(
     state: Arc<AppState>,
-    ofuda_rx: tokio::sync::mpsc::Receiver<EbpfPrefixedEntry>,
+    ofuda_rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
     mihari_rx: tokio::sync::mpsc::Receiver<String>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
@@ -378,6 +388,7 @@ pub async fn run(
         ofuda_rx,
         blocklist_v4_prefix,
         blocklist_v6_prefix,
+        state.config.kekkai_path.clone(),
     ));
     if let Some(mihari_provider) = &state.config.mihari_provider {
         tokio::spawn(mihari::run(
