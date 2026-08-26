@@ -9,6 +9,7 @@ use std::{
 };
 
 use memmap2::Mmap;
+use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -23,7 +24,18 @@ use crate::{
 
 #[repr(C)]
 #[derive(
-    Copy, Clone, Eq, PartialEq, IntoBytes, FromBytes, Immutable, KnownLayout, Ord, PartialOrd,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    IntoBytes,
+    FromBytes,
+    Immutable,
+    KnownLayout,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
 )]
 pub struct Ipv4Prefix {
     pub prefix_len: u32,
@@ -32,7 +44,18 @@ pub struct Ipv4Prefix {
 
 #[repr(C)]
 #[derive(
-    Copy, Clone, Eq, PartialEq, IntoBytes, FromBytes, Immutable, KnownLayout, Ord, PartialOrd,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    IntoBytes,
+    FromBytes,
+    Immutable,
+    KnownLayout,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
 )]
 pub struct Ipv6Prefix {
     pub prefix_len: u32,
@@ -102,6 +125,7 @@ impl FromStr for Ipv6Prefix {
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
+#[derive(Serialize, Deserialize)]
 pub enum IpPrefix {
     V4(Ipv4Prefix),
     V6(Ipv6Prefix),
@@ -138,8 +162,9 @@ macro_rules! insert_single {
 
 #[macro_export]
 macro_rules! delete_single {
-    ($map:expr, $count:expr, $item:expr, $map_name:expr) => {
+    ($map:expr, $item:expr, $map_name:expr) => {{
         let key = aya::maps::lpm_trie::Key::new($item.prefix_len, $item.addr);
+        let mut deleted = false;
         if let Err(e) = $map.remove(&key) {
             if let aya::maps::MapError::SyscallError(sys_error) = &e {
                 if sys_error.io_error.raw_os_error() == Some(libc::ENOENT) {
@@ -152,6 +177,12 @@ macro_rules! delete_single {
                 );
             }
         } else {
+            deleted = true;
+        }
+        deleted
+    }};
+    ($map:expr, $count:expr, $item:expr, $map_name:expr) => {
+        if crate::delete_single!($map, $item, $map_name) {
             $count = $count.saturating_sub(1);
         }
     };
@@ -162,7 +193,7 @@ macro_rules! insert_bulk {
     ($map:expr, $count:expr, $limit:expr, $items:expr, $map_name:expr) => {
         let mut dropped = 0;
         for item in $items {
-            insert_single!($map, $count, $limit, item, dropped, $map_name);
+            crate::insert_single!($map, $count, $limit, item, dropped, $map_name);
         }
         if dropped > 0 {
             error!(
@@ -171,6 +202,66 @@ macro_rules! insert_bulk {
             );
         }
     };
+    ($map:expr, $count:expr, $limit:expr, $items:expr, $map_name:expr, $vec:expr) => {
+        let mut dropped = 0;
+        for item in $items {
+            let old_count = $count;
+            crate::insert_single!($map, $count, $limit, item, dropped, $map_name);
+            if $count > old_count {
+                $vec.push(*item);
+            }
+        }
+        if dropped > 0 {
+            error!(
+                "FIREWALL DEGRADED: {} capacity reached! {} prefixes dropped.",
+                $map_name, dropped
+            );
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! populate_map_from_disk {
+    ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, count => $count:expr) => {{
+        let task = tokio::task::spawn_blocking(move || {
+            let mut file = None;
+            let mut current_count = $count;
+
+            if let Ok(mmap) = crate::ebpf::kekkai_manager::load_sets_from_disk(&$path) {
+                if let Ok(prefixes) = <[$prefix_type]>::ref_from_bytes(&mmap) {
+                    tracing::info!("Using existing {} blocklist", $map_name);
+                    crate::insert_bulk!($map, current_count, $limit, prefixes, $map_name);
+                }
+                file = Some(mmap);
+            }
+            ($map, file, current_count)
+        })
+        .await;
+        task.expect(concat!("Boot task panicked for ", $map_name))
+    }};
+    ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, vec => $list:expr) => {{
+        let task = tokio::task::spawn_blocking(move || {
+            let mut current_count = 0;
+            let mut working_vec = $list;
+
+            if let Ok(mmap) = crate::ebpf::kekkai_manager::load_sets_from_disk(&$path) {
+                if let Ok(prefixes) = <[$prefix_type]>::ref_from_bytes(&mmap) {
+                    tracing::info!("Using existing {} blocklist", $map_name);
+                    crate::insert_bulk!(
+                        $map,
+                        current_count,
+                        $limit,
+                        prefixes,
+                        $map_name,
+                        working_vec
+                    );
+                }
+            }
+            ($map, working_vec)
+        })
+        .await;
+        task.expect(concat!("Boot task panicked for ", $map_name))
+    }};
 }
 
 pub fn save_sets_to_disk<T: IntoBytes + Immutable, P: AsRef<Path>>(
@@ -194,7 +285,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 
 pub async fn run(
     state: Arc<AppState>,
-    ofuda_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
+    ofuda_rx: tokio::sync::mpsc::Receiver<EbpfPrefixedEntry>,
     mihari_rx: tokio::sync::mpsc::Receiver<String>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
@@ -283,7 +374,11 @@ pub async fn run(
         hashira_tx,
         hashira_rx,
     ));
-    tokio::spawn(ofuda::run(ofuda_rx, blocklist_v4_prefix, blocklist_v6_prefix));
+    tokio::spawn(ofuda::run(
+        ofuda_rx,
+        blocklist_v4_prefix,
+        blocklist_v6_prefix,
+    ));
     if let Some(mihari_provider) = &state.config.mihari_provider {
         tokio::spawn(mihari::run(
             mihari_provider.clone(),
