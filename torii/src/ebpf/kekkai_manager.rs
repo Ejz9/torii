@@ -274,6 +274,32 @@ macro_rules! populate_map_from_disk {
     }};
 }
 
+#[macro_export]
+macro_rules! sync_map_to_disk {
+    ($map:expr, $path:expr, $prefix_type:ty, $incoming:expr, $limit:expr, $map_name:expr, $mmap_opt:expr, $count:expr) => {{
+        let mut current_count = $count;
+        let old_mmap = $mmap_opt.take();
+        let task = tokio::task::spawn_blocking(move || {
+            let slice: &[$prefix_type] = old_mmap
+                .as_ref()
+                .and_then(|m| <[$prefix_type]>::ref_from_bytes(m).ok())
+                .unwrap_or(&[]);
+            crate::sync_diff!(slice, $incoming, $map, current_count, $limit, $map_name);
+            let mut mmap = None;
+            if let Err(e) = save_sets_to_disk(&$incoming, &$path) {
+                tracing::error!("Failed to save {} blocklist: {e}", $map_name);
+            } else {
+                mmap = load_sets_from_disk($path)
+                    .inspect_err(|e| tracing::error!("Failed to load {} blocklist: {e}", $map_name))
+                    .ok();
+            }
+            ($map, mmap, current_count)
+        })
+        .await;
+        task.expect(concat!("Sync task panciked at ", $map_name))
+    }};
+}
+
 pub fn save_sets_to_disk<T: IntoBytes + Immutable, P: AsRef<Path>>(
     slice: &[T],
     path: P,
@@ -296,7 +322,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 pub async fn run(
     state: Arc<AppState>,
     ofuda_rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
-    mihari_rx: tokio::sync::mpsc::Receiver<String>,
+    mihari_rx: tokio::sync::mpsc::Receiver<Option<String>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,

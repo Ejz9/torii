@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
                 HashSet<String>,
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
-            let (mihari_tx, mihari_rx) = mpsc::channel::<String>(100);
+            let (mihari_tx, mihari_rx) = mpsc::channel::<Option<String>>(100);
             let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
             let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
                 .max_capacity(100_000)
@@ -111,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
                 ofuda_tx,
+                mihari_tx,
                 state.config.kekkai_path.clone(),
             ));
             tokio::spawn(dns::acme_worker(state.clone(), acme_rx));
