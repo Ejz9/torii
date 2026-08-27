@@ -44,6 +44,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+// Need to drop mpsc of workers that don't start or fail(fail = std exit?).
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
@@ -51,32 +53,19 @@ async fn main() -> anyhow::Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("Setting default subscriber failed");
     tracing_log::LogTracer::init().expect("Failed to initialize log tracer");
-    /* Clean panics for deployment
-    std::panic::set_hook(Box::new(|panic_info| {
-        let payload = panic_info.payload().downcast_ref::<&str>().unwrap_or(&"unknown panic");
-        let location = panic_info.location().unwrap();
-
-        error!(
-            "Thread panicked at {}:{}: {}",
-            location.file(),
-            location.line(),
-            payload
-        )
-    }));
-    */
     let cli = Cli::parse();
-    info!("Attempting to load environment...");
-    dotenvy::dotenv().ok();
-    let config = match Config::new() {
-        Ok(c) => c,
-        Err(e) => {
-            error!("FATAL: {}", e);
-            std::process::exit(1);
-        }
-    };
-    info!("Environment loaded successfully!");
     match cli.command {
         Commands::Start => {
+            info!("Attempting to load environment...");
+            dotenvy::dotenv().ok();
+            let config = match Config::new() {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("FATAL: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            info!("Environment loaded successfully!");
             let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
             let (acme_tx, acme_rx) = mpsc::channel::<(
                 HashSet<String>,
@@ -92,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
             let state = Arc::new(
                 AppState::new(config, cli.config, acme_tx.clone())
                     .await
-                    .expect("Failed to build state"),
+                    .context("FATAL: Daemon failed to build state")?,
             );
             let Some(interface) = state.config.interface.clone() else {
                 error!("Interface not defined in .env");
@@ -168,13 +157,12 @@ async fn main() -> anyhow::Result<()> {
                 let invalid_add_entries = validate_ips(&bans_args.add);
                 let invalid_remove_entries = validate_ips(&bans_args.remove);
                 if invalid_add_entries || invalid_remove_entries {
-                    eprintln!("FATAL: Invalid addresses present");
                     std::process::exit(1);
                 }
                 send_socket_message(SocketMessage::UpdateBans(bans_args))
                     .await
                     .context("FATAL: Daemon rejected ban modifications")?;
-                println!("Bans Processed");
+                println!("Bans Processed"); //Success State? torii bans is not a command it requires flags. So how to limit that or require the flags.
             }
         }
         Commands::Threats { action } => {

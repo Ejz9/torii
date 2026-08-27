@@ -169,18 +169,20 @@ pub async fn send_socket_message(message: SocketMessage) -> Result<(), Error> {
     let bytes = postcard::to_allocvec(&message)
         .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to serialize: {e}")))?;
     let mut stream = UnixStream::connect("/tmp/torii.sock").await.map_err(|e| {
-        Error::InvalidCustomSetup(format!("FATAL: Failed to connect to socket: {e}"))
+        Error::InvalidCustomSetup(format!(
+            "FATAL: Failed to connect to socket is daemon running? {e}"
+        ))
     })?;
     stream.write_u32(bytes.len() as u32).await.map_err(|e| {
-        Error::InvalidCustomSetup(format!("FATAL: Failed to write bytes length: {e}"))
+        Error::InvalidCustomSetup(format!("FATAL: Failed to write bytes length {e}"))
     })?;
     stream
         .write_all(&bytes)
         .await
-        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to write bytes: {e}")))?;
+        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to write bytes {e}")))?;
     let accepted = stream.read_u8().await.map_err(|e| {
         Error::InvalidCustomSetup(format!(
-            "FATAL: Daemon closed connection without confirming: {e}"
+            "FATAL: Daemon closed connection without confirming {e}"
         ))
     })?;
     if accepted == 0 {
@@ -189,22 +191,28 @@ pub async fn send_socket_message(message: SocketMessage) -> Result<(), Error> {
         ));
     }
     let response_len = stream.read_u32().await.map_err(|e| {
-        Error::InvalidCustomSetup(format!("FATAL: Failed to read response length: {e}"))
+        Error::InvalidCustomSetup(format!("FATAL: Failed to read response length {e}"))
     })?;
     let mut response_buf = vec![0u8; response_len as usize];
     stream
         .read_exact(&mut response_buf)
         .await
-        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to read response: {e}")))?;
+        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to read response {e}")))?;
     let response: SocketResponse = postcard::from_bytes(&response_buf)
-        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to deserialize: {e}")))?;
+        .map_err(|e| Error::InvalidCustomSetup(format!("FATAL: Failed to deserialize {e}")))?;
     match response {
         SocketResponse::Success => Ok(()),
         SocketResponse::PartialSuccess(errors) => Err(Error::InvalidCustomSetup(format!(
             "Partial success: The following issues occurred:\n - {}",
             errors.join("\n - ")
         ))),
-        SocketResponse::ListBans(bans) => Ok(println!("Active Bans:\n - {}", bans.join("\n - "))),
+        SocketResponse::ListBans(bans) => {
+            if bans.is_empty() {
+                Ok(println!("There are no active bans"))
+            } else {
+                Ok(println!("Active Bans:\n - {}", bans.join("\n - ")))
+            }
+        }
         SocketResponse::FatalError(err) => {
             Err(Error::InvalidCustomSetup(format!("Daemon Error: {err}")))
         }
@@ -215,7 +223,7 @@ pub fn validate_ips(list: &Vec<String>) -> bool {
     let mut error = false;
     for ip in list {
         if ip.parse::<IpPrefix>().is_err() {
-            eprintln!("FATAL: Invalid IP Address: {ip}");
+            eprintln!("FATAL: Invalid IP Address {ip}");
             if !error {
                 error = true;
             }

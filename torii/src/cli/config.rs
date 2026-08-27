@@ -18,6 +18,7 @@ use crate::{
 };
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ToriiConfig {
     #[serde(default)]
     ddns_domain: Option<String>,
@@ -61,10 +62,17 @@ impl ActiveState {
         ),
         Error,
     > {
-        let path_bytes: Vec<&[u8]> = config.security.forbidden_paths.iter().map(|s| s.as_bytes()).collect();
+        let path_bytes: Vec<&[u8]> = config
+            .security
+            .forbidden_paths
+            .iter()
+            .map(|s| s.as_bytes())
+            .collect();
         let Ok(matcher) = AhoCorasick::new(path_bytes) else {
             error!("Failed to create path matcher");
-            return Err(Error::InvalidCustomSetup("Invalid forbidden_paths pattern".to_string()))
+            return Err(Error::InvalidCustomSetup(
+                "Invalid forbidden_paths pattern".to_string(),
+            ));
         };
         config.security.path_matcher = Arc::new(matcher);
         let mut individual_certs = HashSet::new();

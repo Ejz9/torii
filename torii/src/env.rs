@@ -94,6 +94,9 @@ impl Config {
             .unwrap_or(true);
         let kekkai_path =
             var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
+        if let Err(e) = std::fs::create_dir_all(&kekkai_path) {
+            return Err(Error::Env(format!("Failed to create KEKKAI_PATH: {e}")));
+        }
         let hashira_shm_capacity = var("HASHIRA_SHM_CAPACITY")
             .unwrap_or_else(|_| "100000".to_string())
             .parse::<u32>()?;

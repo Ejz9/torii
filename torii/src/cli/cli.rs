@@ -12,6 +12,7 @@ pub struct Cli {
 pub enum Commands {
     Start,
     Reload,
+    #[command(arg_required_else_help = true)]
     Bans(BansArgs),
     Threats {
         #[arg(default_value = "refresh")]

@@ -306,6 +306,9 @@ pub fn save_sets_to_disk<T: IntoBytes + Immutable, P: AsRef<Path>>(
 ) -> Result<(), Error> {
     let path = path.as_ref();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        error!("Failed to create parent directory: {e}");
+    }
     let mut file = tempfile::Builder::new()
         .prefix(".torii_tmp_")
         .tempfile_in(parent)?;
@@ -426,6 +429,7 @@ pub async fn run(
             mihari_rx,
         ));
     }
+    std::future::pending::<()>().await;
     #[cfg(not(feature = "ebpf"))]
     info!("Kekkai disabled");
 }
