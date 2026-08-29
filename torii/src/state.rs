@@ -23,7 +23,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, RootCertStore, pki_types};
 use tokio::sync::mpsc;
 use toml::from_str;
-use tracing::{error, info};
+use tracing::info;
 use webpki_roots::TLS_SERVER_ROOTS;
 pub struct AppState {
     pub config: Config,
@@ -136,12 +136,10 @@ impl AppState {
         let (configuration, individual_certs, wildcard_certs, certs) =
             ActiveState::build(configuration_parsed, &cert_verifier)?;
         let dynamic_config = Arc::new(ArcSwap::from_pointee(configuration));
-        if let Err(e) = acme_tx
-            .send((individual_certs, wildcard_certs, certs.clone()))
-            .await
-        {
-            error!("FATAL: ACME worker thread is dead: {}", e);
-            std::process::exit(1);
+        if config.acme_provider.is_some() {
+            let _ = acme_tx
+                .send((individual_certs, wildcard_certs, certs.clone()))
+                .await;
         }
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
         let connector = HttpsConnectorBuilder::new()

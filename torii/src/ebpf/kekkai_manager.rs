@@ -398,7 +398,9 @@ pub async fn run(
         error!("FATAL: Failed to extract eBPF map METRICS from memory");
         std::process::exit(1);
     };
-    child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
+    if state.config.ebpf_metrics {
+        child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
+    }
     /*
     if state.remote_sidecars {
         let addr = format!(
@@ -416,6 +418,7 @@ pub async fn run(
         blocklist_v6,
         hashira_tx,
         hashira_rx,
+        cancel_token.clone(),
     ));
     child_workers.spawn(ofuda::run(
         ofuda_rx,

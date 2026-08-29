@@ -32,6 +32,7 @@ pub async fn config_listener(
         HashSet<String>,
         HashMap<String, Arc<CertifiedKey>>,
     )>,
+    acme_provider: bool,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
     mihari_tx: tokio::sync::mpsc::Sender<Option<String>>,
     kekkai_path: String,
@@ -77,12 +78,16 @@ pub async fn config_listener(
             SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
                 Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
                     dynamic_config.store(Arc::new(config));
-                    if let Err(e) = acme_tx
-                        .send((individual_certs, wildcard_certs, custom_certs))
+                    if acme_provider {
+                        let _ = acme_tx
+                            .send((individual_certs, wildcard_certs, custom_certs))
+                            .await;
+                    } else {
+                        send_message(
+                            &mut stream,
+                            SocketResponse::FatalError("ACME provider disabled".to_string()),
+                        )
                         .await
-                    {
-                        error!("FATAL: ACME worker thread is dead: {}", e);
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
                     }
                     send_message(&mut stream, SocketResponse::Success).await
                 }
