@@ -154,9 +154,7 @@ impl IntoResponse for Error {
             Error::SystemTime(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "SystemTime Error").into_response()
             }
-            Error::Http(status, message) => {
-                (status, *message).into_response()
-            }
+            Error::Http(status, message) => (status, message).into_response(),
         }
     }
 }

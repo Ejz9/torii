@@ -61,7 +61,7 @@ pub async fn run(
     hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
     cancel_token: CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     let (shm_register_tx, mut shm_register_rx) =
         tokio::sync::mpsc::channel::<LocalSidecarHandle>(64);
@@ -189,7 +189,7 @@ pub async fn run(
 
                     let timeout = libc::timespec {
                         tv_sec: 0,
-                        tv_nsec: 100_000_000
+                        tv_nsec: 100_000_000,
                     };
 
                     unsafe {
@@ -208,6 +208,7 @@ pub async fn run(
         }
     });
     cancel_token.cancelled().await;
+    Ok(())
     /*
     if remote_sidecars {
         let socket = UdpSocket::bind(addr);
