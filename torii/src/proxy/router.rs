@@ -106,7 +106,7 @@ fn inject_headers(
     source_ip: String,
     upstream_host: &str,
     original_host: &str,
-) {
+) -> Result<(), Error> {
     request_headers.remove("x-forwarded-user");
     request_headers.remove("x-forwarded-email");
     request_headers.remove("x-forwarded-groups");
@@ -122,7 +122,7 @@ fn inject_headers(
 
     request_headers.insert(
         HeaderName::from_static("x-forwarded-for"),
-        HeaderValue::from_str(&source_ip).unwrap(),
+        HeaderValue::from_str(&source_ip)?,
     );
     request_headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
@@ -130,11 +130,11 @@ fn inject_headers(
     );
     request_headers.insert(
         hyper::header::HOST,
-        HeaderValue::from_str(upstream_host).unwrap(),
+        HeaderValue::from_str(upstream_host)?,
     );
     request_headers.insert(
         HeaderName::from_static("x-forwarded-host"),
-        HeaderValue::from_str(original_host).unwrap(),
+        HeaderValue::from_str(original_host)?,
     );
     request_headers.insert(hyper::header::SERVER, HeaderValue::from_static("Torii"));
     request_headers.insert(
@@ -149,4 +149,5 @@ fn inject_headers(
         hyper::header::X_FRAME_OPTIONS,
         HeaderValue::from_static("SAMEORIGIN"),
     );
+    Ok(())
 }

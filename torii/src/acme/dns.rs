@@ -32,14 +32,7 @@ pub async fn acme_worker(
     let mut current_wildcard_certs = HashSet::new();
     let mut current_custom_certificates = HashSet::new();
     let mut sleep_duration = Duration::from_hours(60 * 24);
-    let path = Path::new(&state.config.cert_path);
-    if !path.exists() {
-        if let Err(e) = fs::create_dir_all(&state.config.cert_path).await {
-            error!("Failed to create cert path: {}", e);
-            error!("FATAL: ACME worker is shutting down");
-            return;
-        };
-    }
+    fs::create_dir_all(&state.config.cert_path).await?;
     loop {
         tokio::select! {
             biased;
@@ -222,6 +215,21 @@ async fn create_missing(
         let path = dir.join(domain);
         let cert_path = path.join("fullchain.pem");
         let key_path = path.join("privkey.pem");
+        match fs::create_dir(&path).await {
+            Ok(_) => {
+                needs_refresh.push(domain.clone());
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !fs::try_exists(&cert_path).await.unwrap_or(false)
+                    || !fs::try_exists(&key_path).await.unwrap_or(false)
+                {
+                    needs_refresh.push(domain.clone());
+                    continue;
+                }
+            }
+            Err(e) => return Err(Error::Io(e)),
+        }
         if !fs::try_exists(&path).await? {
             fs::create_dir_all(&path).await?;
             needs_refresh.push(domain.clone());
@@ -247,34 +255,20 @@ async fn create_missing(
             continue;
         };
         let not_after = cert.tbs_certificate.validity.not_after;
-        if (not_after.timestamp() as u64)
-            < SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+        if (not_after.timestamp() as u64) < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
             || (not_after.timestamp() as u64)
-                < SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
+                < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                     + Duration::from_hours(24 * 30).as_secs()
         {
             needs_refresh.push(domain.clone());
             continue;
         }
-        if not_after.timestamp() as u64
-            - SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+        if not_after.timestamp() as u64 - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
             < sleep_duration.as_secs()
         {
             *sleep_duration = Duration::from_secs(
                 not_after.timestamp() as u64
-                    - SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
             );
         }
         let Ok(key_bytes) = fs::read(key_path).await else {

@@ -187,16 +187,9 @@ fn validate_and_parse_custom_certificates(
         )));
     };
     let not_after = cert.tbs_certificate.validity.not_after;
-    if (not_after.timestamp() as u64)
-        < SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+    if (not_after.timestamp() as u64) < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         || (not_after.timestamp() as u64)
-            < SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
+            < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                 + Duration::from_hours(24 * 30).as_secs()
     {
         error!(

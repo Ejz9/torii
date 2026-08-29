@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::oidc::TokenResponse;
 use crate::auth::oidc::{ActiveSession, validate_token};
+use crate::error::Error::{self, Http};
 use crate::state::AppState;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -12,9 +13,10 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
 use url::form_urlencoded;
 
-fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
-    let header_name = HeaderValue::from_str(&session.claims.name).unwrap();
+fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) -> Result<(), Error> {
+    let header_name = HeaderValue::from_str(&session.claims.name)?;
     request_headers.insert(HeaderName::from_static("x-forwarded-user"), header_name);
+    Ok(())
 }
 
 //#[instrument(skip(state, headers), err)]
@@ -23,7 +25,7 @@ pub async fn enforce_auth(
     headers: HeaderMap,
     mut req: Request,
     next: Next,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<impl IntoResponse, Error> {
     let original_uri = req.uri().to_string();
     let bounce = |is_background_asset: bool, sec_fetch_mode: &str| {
         if is_background_asset || sec_fetch_mode == "cors" {
@@ -35,7 +37,7 @@ pub async fn enforce_auth(
         Ok(Redirect::temporary(&login_url).into_response())
     };
     if req.method().as_str() == "CONNECT" {
-        return Err(StatusCode::METHOD_NOT_ALLOWED);
+        return Err(Error::Http(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed"));
     }
     let sec_fetch_site = headers
         .get("sec-fetch-site")
@@ -44,7 +46,7 @@ pub async fn enforce_auth(
     if sec_fetch_site == "cross-site"
         && matches!(req.method().as_str(), "POST" | "PUT" | "DELETE" | "PATCH")
     {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(Http(StatusCode::FORBIDDEN, "Forbidden"));
     }
     let sec_fetch_dest = headers
         .get("sec-fetch-dest")
@@ -68,7 +70,7 @@ pub async fn enforce_auth(
         .and_then(|h| h.to_str().ok())
         .or_else(|| req.uri().authority().map(|auth| auth.host()))
     else {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(Http(StatusCode::BAD_REQUEST, "Bad Request"));
     };
     let Some(matched_route) = state.dynamic_config.load().find_route(host, path) else {
         return bounce(is_background_asset, &sec_fetch_mode);
@@ -114,20 +116,15 @@ pub async fn enforce_auth(
                 .iter()
                 .any(|group| groups.contains(group));
             if !has_access {
-                return Err(StatusCode::FORBIDDEN);
+                return Err(Http(StatusCode::FORBIDDEN, "Forbidden"));
             }
         } else {
-            return Err(StatusCode::FORBIDDEN);
+            return Err(Http(StatusCode::FORBIDDEN, "Forbidden"));
         }
     }
 
     let request_headers = req.headers_mut();
-    if session.claims.exp
-        > SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    {
+    if session.claims.exp > SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() {
         inject_headers(request_headers, &session);
         return Ok(next.run(req).await.into_response());
     }

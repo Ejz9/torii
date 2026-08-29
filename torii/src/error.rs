@@ -65,6 +65,10 @@ pub enum Error {
     Tempfile(#[from] tempfile::PersistError),
     #[error("Invalid Prefix: {0}")]
     InvalidPrefix(String),
+    #[error(transparent)]
+    SystemTime(#[from] std::time::SystemTimeError),
+    #[error("HTTP Error {0}: {1}")]
+    Http(StatusCode, &'static str),
 }
 
 impl IntoResponse for Error {
@@ -146,6 +150,12 @@ impl IntoResponse for Error {
             }
             Error::InvalidPrefix(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Prefix").into_response()
+            }
+            Error::SystemTime(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "SystemTime Error").into_response()
+            }
+            Error::Http(status, message) => {
+                (status, *message).into_response()
             }
         }
     }

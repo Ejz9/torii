@@ -238,7 +238,7 @@ pub async fn fetch_jwks(state: Arc<AppState>) -> Result<(), Error> {
                     .jwks_cache
                     .insert(
                         rsa_data.kid,
-                        DecodingKey::from_rsa_components(&rsa_data.n, &rsa_data.e).unwrap(),
+                        DecodingKey::from_rsa_components(&rsa_data.n, &rsa_data.e)?,
                     )
                     .await;
             }
@@ -252,7 +252,7 @@ pub async fn fetch_jwks(state: Arc<AppState>) -> Result<(), Error> {
                     .jwks_cache
                     .insert(
                         ec_data.kid,
-                        DecodingKey::from_ec_components(&ec_data.x, &ec_data.y).unwrap(),
+                        DecodingKey::from_ec_components(&ec_data.x, &ec_data.y)?,
                     )
                     .await;
             }
