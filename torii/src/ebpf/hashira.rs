@@ -15,8 +15,13 @@ use governor::{
 use keidai::{BufferHeader, ConnectionEvent};
 use memmap2::MmapMut;
 use moka::{Expiry, sync::Cache};
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tracing::{error, warn};
+use tokio::{
+    select,
+    sync::mpsc::{self, Receiver, Sender},
+    task::JoinSet,
+};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 use zerocopy::FromBytes;
 
 use crate::cli::config::ActiveState;
@@ -55,7 +60,9 @@ pub async fn run(
     mut blocklist_v6: HashMap<MapData, [u8; 16], u8>,
     hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
+    cancel_token: CancellationToken,
 ) {
+    let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     let (shm_register_tx, mut shm_register_rx) =
         tokio::sync::mpsc::channel::<LocalSidecarHandle>(64);
     /*
@@ -78,101 +85,129 @@ pub async fn run(
         return;
     };
     */
-    std::thread::spawn(move || {
-        while let Some(entry) = hashira_rx.blocking_recv() {
-            match entry {
-                EbpfEntry::InsertIpv4(addr) => {
-                    if let Err(e) = blocklist_v4.insert(addr, 1, 0) {
-                        error!("Failed to insert IPv4 address into BLOCKLIST_V4: {e}")
+    child_workers.spawn({
+        let cancel_token = cancel_token.clone();
+        async move {
+            loop {
+                let entry = select! {
+                    _ = cancel_token.cancelled() => break,
+                    res = hashira_rx.recv() => {
+                        let Some(entry) = res else { break };
+                        entry
                     }
-                }
-                EbpfEntry::InsertIpv6Addr(addr) => {
-                    if let Err(e) = blocklist_v6.insert(addr, 1, 0) {
-                        error!("Failed to insert IPv6 address into BLOCKLIST_V6: {e}")
+                };
+                match entry {
+                    EbpfEntry::InsertIpv4(addr) => {
+                        if let Err(e) = blocklist_v4.insert(addr, 1, 0) {
+                            error!("Failed to insert IPv4 address into BLOCKLIST_V4: {e}")
+                        }
                     }
-                }
-                EbpfEntry::DeleteIpv4(addr) => {
-                    if let Err(e) = blocklist_v4.remove(&addr) {
-                        error!("Failed to remove IPv4 address from BLOCKLIST_V4: {e}")
+                    EbpfEntry::InsertIpv6Addr(addr) => {
+                        if let Err(e) = blocklist_v6.insert(addr, 1, 0) {
+                            error!("Failed to insert IPv6 address into BLOCKLIST_V6: {e}")
+                        }
                     }
-                }
-                EbpfEntry::DeleteIpv6Addr(addr) => {
-                    if let Err(e) = blocklist_v6.remove(&addr) {
-                        error!("Failed to remove IPv6 address from BLOCKLIST_V6: {e}")
+                    EbpfEntry::DeleteIpv4(addr) => {
+                        if let Err(e) = blocklist_v4.remove(&addr) {
+                            error!("Failed to remove IPv4 address from BLOCKLIST_V4: {e}")
+                        }
+                    }
+                    EbpfEntry::DeleteIpv6Addr(addr) => {
+                        if let Err(e) = blocklist_v6.remove(&addr) {
+                            error!("Failed to remove IPv6 address from BLOCKLIST_V6: {e}")
+                        }
                     }
                 }
             }
+            Ok(())
         }
     });
-    std::thread::spawn(move || {
-        let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
-        let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
-        loop {
-            while let Ok(new_sidecar) = shm_register_rx.try_recv() {
-                sidecars.push(new_sidecar);
-            }
-            if sidecars.is_empty() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
+    child_workers.spawn_blocking({
+        let cancel_token = cancel_token.clone();
+        move || {
+            let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
+            let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
+            loop {
+                if cancel_token.is_cancelled() {
+                    info!("Hashira SHM scanner exiting");
+                    break;
+                }
+                while let Ok(new_sidecar) = shm_register_rx.try_recv() {
+                    sidecars.push(new_sidecar);
+                }
+                if sidecars.is_empty() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
 
-            let mut events_processed = 0;
-            for sidecar in sidecars.iter_mut() {
-                let (head_bytes, data_bytes) = sidecar.mmap.split_at(16);
-                let buffer_head = unsafe { &*(head_bytes.as_ptr() as *const BufferHeader) };
-                let write_head = buffer_head.write_head.value.load(Ordering::Acquire);
-                if write_head > sidecar.read_head + sidecar.size {
-                    warn!("Sidecar {} lapped reader! Snapping head.", sidecar.id); //id or by domain?
-                    sidecar.read_head = write_head - sidecar.size;
-                }
-                let mut processed = 0;
-                while sidecar.read_head < write_head && processed < EVENT_BUDGET {
-                    let index = ((sidecar.read_head & (sidecar.size - 1)) as usize) * EVENT_SIZE; // sidecar.size must be power of 2 for bitwise AND
-                    let chunk = &data_bytes[index..index + EVENT_SIZE];
-                    if let Ok(event) = ConnectionEvent::ref_from_bytes(chunk) {
-                        // need to add validation of the bytes here or in the checks
-                        engine.evaluate_event(event);
-                    } else {
-                        error!("Corrupted event at SHM index {index}");
-                    }
-                    sidecar.read_head += 1;
-                    processed += 1;
-                }
-                if processed > 0 {
-                    buffer_head
-                        .read_head
-                        .value
-                        .store(sidecar.read_head, Ordering::Release);
-                    events_processed += processed;
-                }
-            }
-            if events_processed == 0 {
-                let mut waiters: Vec<FutexWaitv> = Vec::with_capacity(sidecars.len());
-                for sidecar in sidecars.iter() {
+                let mut events_processed = 0;
+                for sidecar in sidecars.iter_mut() {
                     let (head_bytes, data_bytes) = sidecar.mmap.split_at(16);
                     let buffer_head = unsafe { &*(head_bytes.as_ptr() as *const BufferHeader) };
-                    let write_head = buffer_head.write_head.value.load(Ordering::Relaxed) as u64;
-                    let write_head_ptr = &buffer_head.write_head.value as *const _ as u64;
-                    waiters.push(FutexWaitv {
-                        val: write_head,
-                        uaddr: write_head_ptr,
-                        flags: 2,
-                        __reserved: 0,
-                    })
+                    let write_head = buffer_head.write_head.value.load(Ordering::Acquire);
+                    if write_head > sidecar.read_head + sidecar.size {
+                        warn!("Sidecar {} lapped reader! Snapping head.", sidecar.id); //id or by domain?
+                        sidecar.read_head = write_head - sidecar.size;
+                    }
+                    let mut processed = 0;
+                    while sidecar.read_head < write_head && processed < EVENT_BUDGET {
+                        let index =
+                            ((sidecar.read_head & (sidecar.size - 1)) as usize) * EVENT_SIZE; // sidecar.size must be power of 2 for bitwise AND
+                        let chunk = &data_bytes[index..index + EVENT_SIZE];
+                        if let Ok(event) = ConnectionEvent::ref_from_bytes(chunk) {
+                            // need to add validation of the bytes here or in the checks
+                            engine.evaluate_event(event);
+                        } else {
+                            error!("Corrupted event at SHM index {index}");
+                        }
+                        sidecar.read_head += 1;
+                        processed += 1;
+                    }
+                    if processed > 0 {
+                        buffer_head
+                            .read_head
+                            .value
+                            .store(sidecar.read_head, Ordering::Release);
+                        events_processed += processed;
+                    }
                 }
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_futex_waitv,
-                        waiters.as_ptr(),
-                        waiters.len() as u32,
-                        0,
-                        0,
-                        0,
-                    );
+                if events_processed == 0 {
+                    let mut waiters: Vec<FutexWaitv> = Vec::with_capacity(sidecars.len());
+                    for sidecar in sidecars.iter() {
+                        let (head_bytes, data_bytes) = sidecar.mmap.split_at(16);
+                        let buffer_head = unsafe { &*(head_bytes.as_ptr() as *const BufferHeader) };
+                        let write_head =
+                            buffer_head.write_head.value.load(Ordering::Relaxed) as u64;
+                        let write_head_ptr = &buffer_head.write_head.value as *const _ as u64;
+                        waiters.push(FutexWaitv {
+                            val: write_head,
+                            uaddr: write_head_ptr,
+                            flags: 2,
+                            __reserved: 0,
+                        })
+                    }
+
+                    let timeout = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 100_000_000
+                    };
+
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_futex_waitv,
+                            waiters.as_ptr(),
+                            waiters.len() as u32,
+                            0,
+                            &timeout as *const libc::timespec,
+                            libc::CLOCK_MONOTONIC,
+                        );
+                    }
                 }
             }
+            Ok(())
         }
     });
+    cancel_token.cancelled().await;
     /*
     if remote_sidecars {
         let socket = UdpSocket::bind(addr);

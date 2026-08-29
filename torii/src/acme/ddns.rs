@@ -1,15 +1,24 @@
 use std::{cmp, sync::Arc, time::Duration};
 
-use tokio::time::sleep;
-use tracing::error;
+use tokio::{select, time::sleep};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 
 use crate::state::AppState;
 
-pub async fn run(state: Arc<AppState>) {
+pub async fn run(state: Arc<AppState>, cancel_token: CancellationToken) -> anyhow::Result<()> {
     let mut last_known_ip: Option<std::net::IpAddr> = None;
     let mut cached_record_id: Option<String> = None;
     let mut failed_attempts = 0;
     loop {
+        select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                info!("DDNS recieved shutdown signal. Halting refresh.");
+                break;
+            }
+            _ = sleep(Duration::from_mins(5)) => {}
+        }
         let ddns_domain = &state.dynamic_config.load().ddns_domain;
         let Some(domain) = ddns_domain else {
             error!("DDNS domain not set");
@@ -64,6 +73,6 @@ pub async fn run(state: Arc<AppState>) {
                 }
             }
         }
-        sleep(Duration::from_mins(5)).await;
     }
+    Ok(())
 }

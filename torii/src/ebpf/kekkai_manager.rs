@@ -10,6 +10,8 @@ use std::{
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -329,8 +331,10 @@ pub async fn run(
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,
-) {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     use aya::maps::{HashMap, PerCpuArray, lpm_trie::LpmTrie};
+    let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     info!("Kekkai initalizing on {}...", interface);
     let Ok(mut ebpf_guard) = init_ebpf(&interface).await else {
         error!("FATAL: Failed to initialize eBPF");
@@ -394,7 +398,7 @@ pub async fn run(
         error!("FATAL: Failed to extract eBPF map METRICS from memory");
         std::process::exit(1);
     };
-    tokio::spawn(metrics::run(metrics));
+    child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
     /*
     if state.remote_sidecars {
         let addr = format!(
@@ -403,7 +407,7 @@ pub async fn run(
         );
     }
     */
-    tokio::spawn(hashira::run(
+    child_workers.spawn(hashira::run(
         state.config.hashira_shm_capacity,
         //state.config.remote_sidecars,
         //addr,
@@ -413,14 +417,15 @@ pub async fn run(
         hashira_tx,
         hashira_rx,
     ));
-    tokio::spawn(ofuda::run(
+    child_workers.spawn(ofuda::run(
         ofuda_rx,
         blocklist_v4_prefix,
         blocklist_v6_prefix,
         state.config.kekkai_path.clone(),
+        cancel_token.clone(),
     ));
     if let Some(mihari_provider) = &state.config.mihari_provider {
-        tokio::spawn(mihari::run(
+        child_workers.spawn(mihari::run(
             mihari_provider.clone(),
             state.config.mihari_interval,
             state.config.kekkai_path.clone(),
@@ -429,9 +434,17 @@ pub async fn run(
             mihari_rx,
         ));
     }
-    std::future::pending::<()>().await;
+    cancel_token.cancelled().await;
+    info!("Kekkai manager recieved shutdown signal. Waiting for child workers...");
+    while let Some(res) = child_workers.join_next().await {
+        if let Err(e) = res {
+            error!("A child worker panciked during shutdown {e}");
+        }
+    }
+    info!("Kekkai completed shutdown. Detaching eBPF program...");
     #[cfg(not(feature = "ebpf"))]
     info!("Kekkai disabled");
+    Ok(())
 }
 
 #[cfg(feature = "ebpf")]

@@ -9,7 +9,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
 };
-use tracing::error;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 
 use crate::{
     cli::{
@@ -34,119 +35,115 @@ pub async fn config_listener(
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
     mihari_tx: tokio::sync::mpsc::Sender<Option<String>>,
     kekkai_path: String,
-) {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     std::fs::remove_file("/tmp/torii.sock").ok();
     let Ok(listener) = UnixListener::bind("/tmp/torii.sock") else {
         error!("FATAL: Failed to create config socket, does it already exist?");
         std::process::exit(1)
     };
     loop {
-        match listener.accept().await {
-            Ok((mut stream, _)) => {
-                let Ok(size) = stream.read_u32().await else {
-                    let _ = stream.write_u8(0).await;
-                    continue;
-                };
-                let mut buffer = vec![0u8; size as usize];
-                let Ok(bytes) = stream.read(&mut buffer).await else {
-                    let _ = stream.write_u8(0).await;
-                    continue;
-                };
-                let Some(data) = postcard::from_bytes(&buffer[..bytes]).ok() else {
-                    let _ = stream.write_u8(0).await;
-                    continue;
-                };
-                let _ = stream.write_u8(1).await;
-                match data {
-                    SocketMessage::ReloadConfig(data) => {
-                        match ActiveState::build(data, &cert_verifier) {
-                            Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
-                                dynamic_config.store(Arc::new(config));
-                                if let Err(e) = acme_tx
-                                    .send((individual_certs, wildcard_certs, custom_certs))
-                                    .await
-                                {
-                                    error!("FATAL: ACME worker thread is dead: {}", e);
-                                    send_message(
-                                        &mut stream,
-                                        SocketResponse::FatalError(e.to_string()),
-                                    )
-                                    .await
-                                }
-                                send_message(&mut stream, SocketResponse::Success).await
-                            }
-                            Err(e) => {
-                                send_message(&mut stream, SocketResponse::FatalError(e.to_string()))
-                                    .await
-                            }
-                        }
-                    }
-                    SocketMessage::UpdateBans(bans_args) => {
-                        let invalid_add_entries = validate_ips(&bans_args.add);
-                        let invalid_remove_entries = validate_ips(&bans_args.remove);
-                        if invalid_add_entries || invalid_remove_entries {
-                            error!("Invalid addresses present");
-                            continue;
-                        }
-                        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Vec<String>>>();
-                        let entry: OfudaEntry = (bans_args, tx).into();
-                        if let Err(e) = ofuda_tx.send(entry).await {
-                            error!("Failed to send entry to ofuda: {e}")
-                        }
-                        match rx.await {
-                            Ok(Ok(())) => send_message(&mut stream, SocketResponse::Success).await,
-                            Ok(Err(err_vec)) => {
-                                send_message(&mut stream, SocketResponse::PartialSuccess(err_vec))
-                                    .await
-                            }
-                            Err(_) => {
-                                send_message(
-                                    &mut stream,
-                                    SocketResponse::FatalError(
-                                        "Ofuda worker crashed or dropped request".to_string(),
-                                    ),
-                                )
-                                .await
-                            }
-                        }
-                    }
-                    SocketMessage::ListBans(filter) => {
-                        match get_ofuda_list(&filter, &kekkai_path).await {
-                            Ok(bans) => {
-                                let strings: Vec<String> =
-                                    bans.iter().map(|ip| ip.to_string()).collect();
-                                send_message(&mut stream, SocketResponse::ListBans(strings)).await
-                            }
-                            Err(e) => {
-                                send_message(&mut stream, SocketResponse::FatalError(e.to_string()))
-                                    .await
-                            }
-                        }
-                    }
-                    SocketMessage::CommandMihari { action } => {
-                        if action.eq_ignore_ascii_case("stop") {
-                            if let Err(e) = mihari_tx.send(None).await {
-                                error!("Failed to send shutdown signal to mihari: {e}");
-                                send_message(&mut stream, SocketResponse::FatalError(e.to_string()))
-                                    .await
-                            }
-                        } else {
-                            if let Err(e) = mihari_tx.send(Some(action)).await {
-                                error!("Failed to send action to mihari: {e}");
-                                send_message(&mut stream, SocketResponse::FatalError(e.to_string()))
-                                    .await
-                            }
-                        }
-                        send_message(&mut stream, SocketResponse::Success).await;
+        let mut stream = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                info!("Config socket recieved shutdown signal. Halting listener.");
+                break;
+            }
+            res = listener.accept() => {
+                match res {
+                    Ok((s, _addr)) => s,
+                    Err(e) => {
+                        error!("FATAL: Failed to recieve config bytes: {}", e);
+                        continue;
                     }
                 }
             }
-            Err(e) => {
-                error!("FATAL: Failed to recieve config bytes: {}", e);
-                std::process::exit(1)
+        };
+        let Ok(size) = stream.read_u32().await else {
+            let _ = stream.write_u8(0).await;
+            continue;
+        };
+        let mut buffer = vec![0u8; size as usize];
+        let Ok(bytes) = stream.read(&mut buffer).await else {
+            let _ = stream.write_u8(0).await;
+            continue;
+        };
+        let Some(data) = postcard::from_bytes(&buffer[..bytes]).ok() else {
+            let _ = stream.write_u8(0).await;
+            continue;
+        };
+        let _ = stream.write_u8(1).await;
+        match data {
+            SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
+                Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
+                    dynamic_config.store(Arc::new(config));
+                    if let Err(e) = acme_tx
+                        .send((individual_certs, wildcard_certs, custom_certs))
+                        .await
+                    {
+                        error!("FATAL: ACME worker thread is dead: {}", e);
+                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                    }
+                    send_message(&mut stream, SocketResponse::Success).await
+                }
+                Err(e) => {
+                    send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                }
+            },
+            SocketMessage::UpdateBans(bans_args) => {
+                let invalid_add_entries = validate_ips(&bans_args.add);
+                let invalid_remove_entries = validate_ips(&bans_args.remove);
+                if invalid_add_entries || invalid_remove_entries {
+                    error!("Invalid addresses present");
+                    continue;
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Vec<String>>>();
+                let entry: OfudaEntry = (bans_args, tx).into();
+                if let Err(e) = ofuda_tx.send(entry).await {
+                    error!("Failed to send entry to ofuda: {e}")
+                }
+                match rx.await {
+                    Ok(Ok(())) => send_message(&mut stream, SocketResponse::Success).await,
+                    Ok(Err(err_vec)) => {
+                        send_message(&mut stream, SocketResponse::PartialSuccess(err_vec)).await
+                    }
+                    Err(_) => {
+                        send_message(
+                            &mut stream,
+                            SocketResponse::FatalError(
+                                "Ofuda worker crashed or dropped request".to_string(),
+                            ),
+                        )
+                        .await
+                    }
+                }
+            }
+            SocketMessage::ListBans(filter) => match get_ofuda_list(&filter, &kekkai_path).await {
+                Ok(bans) => {
+                    let strings: Vec<String> = bans.iter().map(|ip| ip.to_string()).collect();
+                    send_message(&mut stream, SocketResponse::ListBans(strings)).await
+                }
+                Err(e) => {
+                    send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                }
+            },
+            SocketMessage::CommandMihari { action } => {
+                if action.eq_ignore_ascii_case("stop") {
+                    if let Err(e) = mihari_tx.send(None).await {
+                        error!("Failed to send shutdown signal to mihari: {e}");
+                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                    }
+                } else {
+                    if let Err(e) = mihari_tx.send(Some(action)).await {
+                        error!("Failed to send action to mihari: {e}");
+                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                    }
+                }
+                send_message(&mut stream, SocketResponse::Success).await;
             }
         }
     }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]

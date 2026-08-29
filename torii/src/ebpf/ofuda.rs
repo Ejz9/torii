@@ -1,7 +1,9 @@
 use std::{io::ErrorKind, path::PathBuf};
 
 use aya::maps::{LpmTrie, MapData};
-use tracing::error;
+use tokio::select;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 use zerocopy::{FromBytes, Immutable};
 
 use crate::{
@@ -45,7 +47,8 @@ pub async fn run(
     mut ofuda_v4: LpmTrie<MapData, u32, u8>,
     mut ofuda_v6: LpmTrie<MapData, [u8; 16], u8>,
     kekkai_path: String,
-) {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     let ofuda_path = PathBuf::from(kekkai_path);
 
     let path_v4 = ofuda_path.join("ofuda_v4.bin");
@@ -67,7 +70,19 @@ pub async fn run(
         vec => Vec::new()
     );
 
-    while let Some(entry) = rx.recv().await {
+    loop {
+        let entry = select! {
+            _ = cancel_token.cancelled() => {
+                info!("eBPF Metrics recieved shutdown signal. Halting.");
+                break;
+            }
+            res = rx.recv() => {
+                let Some(entry) = res else {
+                    break;
+                };
+                entry
+            }
+        };
         let mut errors: Vec<String> = Vec::new();
         for ip in entry.remove {
             if let Ok(prefix) = ip.parse::<IpPrefix>() {
@@ -172,6 +187,7 @@ pub async fn run(
             }
         }
     }
+    Ok(())
 }
 
 pub async fn get_ofuda_list(filter: &IpFilter, ofuda_path: &str) -> Result<Vec<IpPrefix>, Error> {

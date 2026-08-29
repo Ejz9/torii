@@ -1,14 +1,25 @@
 use aya::maps::{MapData, PerCpuArray, PerCpuValues};
+use tokio::select;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-pub async fn run(mut metrics: PerCpuArray<MapData, u64>) {
+pub async fn run(
+    mut metrics: PerCpuArray<MapData, u64>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     let Ok(nr_cpus) = aya::util::nr_cpus() else {
         error!("FATAL: Failed to get number of CPUs");
         std::process::exit(1);
     };
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
     loop {
-        interval.tick().await;
+        select! {
+            _ = cancel_token.cancelled() => {
+                info!("eBPF Metrics recieved shutdown signal. Halting.");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
         let Ok(passed_raw) = metrics.get(&0, 0) else {
             error!("Failed to get pass metrics");
             continue;
@@ -37,4 +48,5 @@ pub async fn run(mut metrics: PerCpuArray<MapData, u64>) {
             error!("Failed to reset drop metrics: {e}")
         }
     }
+    Ok(())
 }

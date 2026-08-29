@@ -13,8 +13,11 @@ use moka::sync::Cache;
 use rustls::ServerConfig;
 use rustls::sign::CertifiedKey;
 use tokio::fs::read_to_string;
+use tokio::select;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use toml::from_str;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
@@ -66,6 +69,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             info!("Environment loaded successfully!");
+            let root_token = CancellationToken::new();
+            let worker_token = root_token.child_token();
+            let network_token = root_token.child_token();
+            let mut worker_set: JoinSet<anyhow::Result<()>> = JoinSet::new();
             let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
             let (acme_tx, acme_rx) = mpsc::channel::<(
                 HashSet<String>,
@@ -87,25 +94,27 @@ async fn main() -> anyhow::Result<()> {
                 error!("Interface not defined in .env");
                 std::process::exit(1);
             };
-            tokio::spawn(kekkai_manager::run(
+            worker_set.spawn(kekkai_manager::run(
                 state.clone(),
                 ofuda_rx,
                 mihari_rx,
                 hashira_tx.clone(),
                 hashira_rx,
                 interface,
+                worker_token.clone()
             ));
-            tokio::spawn(socket::config_listener(
+            worker_set.spawn(socket::config_listener(
                 Arc::clone(&state.dynamic_config),
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
                 ofuda_tx,
                 mihari_tx,
                 state.config.kekkai_path.clone(),
+                worker_token.clone()
             ));
-            tokio::spawn(dns::acme_worker(state.clone(), acme_rx));
+            worker_set.spawn(dns::acme_worker(state.clone(), acme_rx, worker_token.clone()));
             if state.config.ddns {
-                tokio::spawn(ddns::run(state.clone()));
+                worker_set.spawn(ddns::run(state.clone(), worker_token.clone()));
             }
             fetch_jwks(state.clone())
                 .await
@@ -162,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
                 send_socket_message(SocketMessage::UpdateBans(bans_args))
                     .await
                     .context("FATAL: Daemon rejected ban modifications")?;
-                println!("Bans Processed"); //Success State? torii bans is not a command it requires flags. So how to limit that or require the flags.
+                println!("Bans Processed");
             }
         }
         Commands::Threats { action } => {

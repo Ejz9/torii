@@ -9,8 +9,9 @@ use rustls::{
 use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::mpsc::Sender};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 use crate::ebpf::hashira::EbpfEntry;
 
@@ -48,10 +49,21 @@ pub async fn serve(
     acceptor: TlsAcceptor,
     l4_rate_limiter: Cache<IpAddr, u32>,
     hashira_tx: Sender<EbpfEntry>,
-) {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     loop {
-        let Ok((tcp_stream, remote_addr)) = listener.accept().await else {
-            continue;
+        let (tcp_stream, remote_addr) = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                info!("Server recieved shutdown signal. Halting listener.");
+                break;
+            }
+            res = listener.accept() => {
+                let Ok(conn) = res else {
+                    continue;
+                };
+                conn
+            }
         };
 
         let connections = l4_rate_limiter.get_with(remote_addr.ip(), || 0) + 1;
@@ -107,6 +119,7 @@ pub async fn serve(
             }
         });
     }
+    Ok(())
 }
 
 fn handle_connection_error(e: Box<dyn std::error::Error + Send + Sync>) {

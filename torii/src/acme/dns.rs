@@ -16,6 +16,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{fs, time::sleep};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::{error::Error, state::AppState};
@@ -27,7 +28,8 @@ pub async fn acme_worker(
         HashSet<String>,
         HashMap<String, Arc<CertifiedKey>>,
     )>,
-) {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     let mut current_individual_certs = HashSet::new();
     let mut current_wildcard_certs = HashSet::new();
     let mut current_custom_certificates = HashSet::new();
@@ -36,6 +38,10 @@ pub async fn acme_worker(
     loop {
         tokio::select! {
             biased;
+            _ = cancel_token.cancelled() => {
+                info!("ACME recieved shutdown signal. Halting refresh.");
+                break;
+            }
             Some((new_individual_certs, new_wildcard_certs, custom_certs)) = rx.recv() => {
                 current_individual_certs = new_individual_certs;
                 current_wildcard_certs = new_wildcard_certs;
@@ -48,9 +54,10 @@ pub async fn acme_worker(
 
                 sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await;
             }
-            _ = tokio::time::sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
+            _ = sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
         }
     }
+    Ok(())
 }
 
 async fn refresh_certificates(
