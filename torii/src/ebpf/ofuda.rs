@@ -73,7 +73,7 @@ pub async fn run(
     loop {
         let entry = select! {
             _ = cancel_token.cancelled() => {
-                info!("eBPF Metrics recieved shutdown signal. Halting.");
+                info!("eBPF Ofuda recieved shutdown signal. Halting.");
                 break;
             }
             res = rx.recv() => {

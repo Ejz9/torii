@@ -34,7 +34,7 @@ pub async fn config_listener(
     )>,
     acme_provider: bool,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
-    mihari_tx: tokio::sync::mpsc::Sender<Option<String>>,
+    mihari_notify: Arc<tokio::sync::Notify>,
     kekkai_path: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -132,18 +132,8 @@ pub async fn config_listener(
                     send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
                 }
             },
-            SocketMessage::CommandMihari { action } => {
-                if action.eq_ignore_ascii_case("stop") {
-                    if let Err(e) = mihari_tx.send(None).await {
-                        error!("Failed to send shutdown signal to mihari: {e}");
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                    }
-                } else {
-                    if let Err(e) = mihari_tx.send(Some(action)).await {
-                        error!("Failed to send action to mihari: {e}");
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                    }
-                }
+            SocketMessage::ReloadMihari => {
+                mihari_notify.notify_one();
                 send_message(&mut stream, SocketResponse::Success).await;
             }
         }
@@ -156,7 +146,7 @@ pub enum SocketMessage {
     ReloadConfig(ToriiConfig),
     UpdateBans(BansArgs),
     ListBans(IpFilter),
-    CommandMihari { action: String },
+    ReloadMihari,
 }
 
 #[derive(Serialize, Deserialize)]

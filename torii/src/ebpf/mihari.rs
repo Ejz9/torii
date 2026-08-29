@@ -1,9 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub mod crowdsec;
 
 use aya::maps::{LpmTrie, MapData};
-use tracing::error;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 use zerocopy::FromBytes;
 
 use crate::{
@@ -69,8 +70,9 @@ pub async fn run(
     kekkai_path: String,
     mut mihari_v4: LpmTrie<MapData, u32, u8>,
     mut mihari_v6: LpmTrie<MapData, [u8; 16], u8>,
-    mut rx: tokio::sync::mpsc::Receiver<Option<String>>,
-) {
+    mihari_notify: Arc<tokio::sync::Notify>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_mins(interval));
     let mihari_ipv4_count: u32 = 0;
     let mihari_ipv6_count: u32 = 0;
@@ -86,12 +88,11 @@ pub async fn run(
     loop {
         tokio::select! {
             biased;
-            msg = rx.recv() => {
-                if msg.flatten().is_none() {
-                    error!("Mihari provider disconnected. Worker exiting.");
-                    break;
-                }
+            _ = cancel_token.cancelled() => {
+                info!("eBPF Mihari recieved shutdown signal. Halting.");
+                break;
             }
+            _ = mihari_notify.notified() => {}
             _ = interval.tick() => {}
 
         }
@@ -161,6 +162,7 @@ pub async fn run(
 
         interval.tick().await;
     }
+    Ok(())
 }
 
 trait MihariProvider: Send + Sync {

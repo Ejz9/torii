@@ -4,9 +4,13 @@ use tokio::{select, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::state::AppState;
+use crate::{acme::providers::ProviderKind, state::AppState};
 
-pub async fn run(state: Arc<AppState>, cancel_token: CancellationToken) -> anyhow::Result<()> {
+pub async fn run(
+    state: Arc<AppState>,
+    acme_provider: ProviderKind,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
     let mut last_known_ip: Option<std::net::IpAddr> = None;
     let mut cached_record_id: Option<String> = None;
     let mut failed_attempts = 0;
@@ -50,9 +54,7 @@ pub async fn run(state: Arc<AppState>, cancel_token: CancellationToken) -> anyho
         };
 
         if Some(response_ip) != last_known_ip {
-            match state
-                .config
-                .acme_provider
+            match acme_provider
                 .sync_ip(
                     domain,
                     &response_ip.to_string(),

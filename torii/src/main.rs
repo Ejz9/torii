@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
                 HashSet<String>,
                 HashMap<String, Arc<CertifiedKey>>,
             )>(20);
-            let (mihari_tx, mihari_rx) = mpsc::channel::<Option<String>>(100);
+            let mihari_notify = Arc::new(Notify::new());
             let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
             let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
                 .max_capacity(100_000)
@@ -97,24 +97,38 @@ async fn main() -> anyhow::Result<()> {
             worker_set.spawn(kekkai_manager::run(
                 state.clone(),
                 ofuda_rx,
-                mihari_rx,
+                Arc::clone(&mihari_notify),
                 hashira_tx.clone(),
                 hashira_rx,
                 interface,
-                worker_token.clone()
+                worker_token.clone(),
             ));
             worker_set.spawn(socket::config_listener(
                 Arc::clone(&state.dynamic_config),
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
+                state.config.acme_provider.is_some(),
                 ofuda_tx,
-                mihari_tx,
+                mihari_notify,
                 state.config.kekkai_path.clone(),
-                worker_token.clone()
+                worker_token.clone(),
             ));
-            worker_set.spawn(dns::acme_worker(state.clone(), acme_rx, worker_token.clone()));
-            if state.config.ddns {
-                worker_set.spawn(ddns::run(state.clone(), worker_token.clone()));
+            if let Some(acme_provider) = state.config.acme_provider.clone() {
+                worker_set.spawn(dns::acme_worker(
+                    state.clone(),
+                    acme_provider.clone(),
+                    acme_rx,
+                    worker_token.clone(),
+                ));
+                if state.config.ddns {
+                    worker_set.spawn(ddns::run(
+                        state.clone(),
+                        acme_provider,
+                        worker_token.clone(),
+                    ));
+                }
+            } else {
+                drop(acme_rx);
             }
             fetch_jwks(state.clone())
                 .await
@@ -174,16 +188,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("Bans Processed");
             }
         }
-        Commands::Threats { action } => {
-            let is_stop = action.eq_ignore_ascii_case("stop");
-            send_socket_message(SocketMessage::CommandMihari { action })
+        Commands::ReloadThreats => {
+            send_socket_message(SocketMessage::ReloadMihari)
                 .await
                 .context("FATAL: Daemon failed to communicate with mihari worker thread")?;
-            if is_stop {
-                println!("Mihari threat worker stopped");
-            } else {
-                println!("Mhiari threat worker refreshed");
-            }
+            println!("Mhiari threat worker refreshed");
         }
     }
     std::process::exit(0);

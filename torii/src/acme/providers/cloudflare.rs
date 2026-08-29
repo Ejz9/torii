@@ -5,7 +5,7 @@ use crate::{
     error::Error,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CloudflareProvider {
     pub zone_id: String,
     pub api_token: String,

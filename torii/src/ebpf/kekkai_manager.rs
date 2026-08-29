@@ -327,7 +327,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 pub async fn run(
     state: Arc<AppState>,
     ofuda_rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
-    mihari_rx: tokio::sync::mpsc::Receiver<Option<String>>,
+    mihari_notify: Arc<tokio::sync::Notify>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,
@@ -434,7 +434,8 @@ pub async fn run(
             state.config.kekkai_path.clone(),
             mihari_v4,
             mihari_v6,
-            mihari_rx,
+            mihari_notify,
+            cancel_token.clone(),
         ));
     }
     cancel_token.cancelled().await;
