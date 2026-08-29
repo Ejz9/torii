@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aho_corasick::AhoCorasick;
 use axum::http;
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use crate::{
 };
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ToriiConfig {
     #[serde(default)]
     ddns_domain: Option<String>,
@@ -49,7 +51,7 @@ pub struct RouteMatch {
 
 impl ActiveState {
     pub fn build(
-        config: ToriiConfig,
+        mut config: ToriiConfig,
         verifier: &Arc<WebPkiServerVerifier>,
     ) -> Result<
         (
@@ -60,6 +62,19 @@ impl ActiveState {
         ),
         Error,
     > {
+        let path_bytes: Vec<&[u8]> = config
+            .security
+            .forbidden_paths
+            .iter()
+            .map(|s| s.as_bytes())
+            .collect();
+        let Ok(matcher) = AhoCorasick::new(path_bytes) else {
+            error!("Failed to create path matcher");
+            return Err(Error::InvalidCustomSetup(
+                "Invalid forbidden_paths pattern".to_string(),
+            ));
+        };
+        config.security.path_matcher = Arc::new(matcher);
         let mut individual_certs = HashSet::new();
         let mut wildcard_certs = HashSet::new();
         let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
@@ -201,18 +216,24 @@ fn validate_and_parse_custom_certificates(
 pub struct SecurityConfig {
     #[serde(default = "default_certificate_mode_wildcard")]
     default_certificate_mode_wildcard: bool,
-    #[serde(default = "default_ebpf_strike_threshold")]
-    ebpf_strike_threshold: u64,
-    #[serde(default = "default_ebpf_lockout_duration_secs")]
-    ebpf_lockout_duration_secs: u64,
+    #[serde(default = "forbidden_paths")]
+    forbidden_paths: Vec<String>,
+    #[serde(default = "ebpf_strike_threshold")]
+    pub ebpf_strike_threshold: u64,
+    #[serde(default = "ebpf_lockout_duration_secs")]
+    pub ebpf_lockout_duration_secs: u64,
+    #[serde(skip, default = "default_path_matcher")]
+    pub path_matcher: Arc<AhoCorasick>,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             default_certificate_mode_wildcard: false,
+            forbidden_paths: vec![],
             ebpf_strike_threshold: 10,
             ebpf_lockout_duration_secs: 3600,
+            path_matcher: default_path_matcher(),
         }
     }
 }
@@ -220,11 +241,17 @@ impl Default for SecurityConfig {
 fn default_certificate_mode_wildcard() -> bool {
     false
 }
-fn default_ebpf_strike_threshold() -> u64 {
+fn forbidden_paths() -> Vec<String> {
+    vec![]
+}
+fn ebpf_strike_threshold() -> u64 {
     10
 }
-fn default_ebpf_lockout_duration_secs() -> u64 {
+fn ebpf_lockout_duration_secs() -> u64 {
     3600
+}
+fn default_path_matcher() -> Arc<AhoCorasick> {
+    Arc::new(AhoCorasick::new(Vec::<&[u8]>::new()).unwrap())
 }
 
 #[derive(Serialize, Deserialize, Clone)]

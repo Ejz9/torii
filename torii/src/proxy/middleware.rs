@@ -10,7 +10,6 @@ use axum::http::header;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect};
-use tracing::instrument;
 use url::form_urlencoded;
 
 fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
@@ -18,7 +17,7 @@ fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) {
     request_headers.insert(HeaderName::from_static("x-forwarded-user"), header_name);
 }
 
-#[instrument(skip(state, headers), err)]
+//#[instrument(skip(state, headers), err)]
 pub async fn enforce_auth(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

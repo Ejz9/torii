@@ -61,6 +61,10 @@ pub enum Error {
     WebPki(#[from] rustls::server::VerifierBuilderError),
     #[error(transparent)]
     ServerName(#[from] rustls::pki_types::InvalidDnsNameError),
+    #[error(transparent)]
+    Tempfile(#[from] tempfile::PersistError),
+    #[error("Invalid Prefix: {0}")]
+    InvalidPrefix(String),
 }
 
 impl IntoResponse for Error {
@@ -136,6 +140,12 @@ impl IntoResponse for Error {
             Error::WebPki(_) => (StatusCode::INTERNAL_SERVER_ERROR, "WebPki Error").into_response(),
             Error::ServerName(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Server Name Error").into_response()
+            }
+            Error::Tempfile(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Tempfile Error").into_response()
+            }
+            Error::InvalidPrefix(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Prefix").into_response()
             }
         }
     }

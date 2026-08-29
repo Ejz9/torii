@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::read_to_string;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::fs::read_to_string;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
-use crate::config::structs::ActiveState;
+use crate::cli::config::ActiveState;
 use crate::env::Config;
 use crate::error::Error;
 use arc_swap::ArcSwap;
@@ -32,14 +32,9 @@ pub struct AppState {
     pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
     pub limiter_cache: Cache<String, ()>,
-    pub dynamic_config: ArcSwap<ActiveState>,
+    pub dynamic_config: Arc<ArcSwap<ActiveState>>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
-    pub tx: tokio::sync::mpsc::Sender<(
-        HashSet<String>,
-        HashSet<String>,
-        HashMap<String, Arc<CertifiedKey>>,
-    )>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
 }
@@ -50,10 +45,12 @@ const DEFAULT_CONFIG_STRING: &str = r#"
 [security]
 # Determines if the proxy opts for wildcard certificates or individual certificates
 default_certificate_mode_wildcard = true
+# Paths an IP will be blocked for accessing
+forbidden_paths: ["../", "%2e%2e", "/.env", "/cgi-bin/", "${"]
 # The number of malicious requests before the kernel drops the IP at the NIC
 ebpf_strike_threshold = 10
 # How long (in seconds) the offending IP remains locked out
-ebpf_lockout_duration_secs = 3600
+ebpf_lockout_duration_secs = 300
 
 [routes]
 # Routes are defined by their subdomain and path
@@ -69,7 +66,7 @@ impl AppState {
     pub async fn new(
         config: Config,
         config_path: String,
-        tx: mpsc::Sender<(
+        acme_tx: mpsc::Sender<(
             HashSet<String>,
             HashSet<String>,
             HashMap<String, Arc<CertifiedKey>>,
@@ -99,7 +96,7 @@ impl AppState {
             .max_capacity(10_000)
             .time_to_live(Duration::from_secs(15))
             .build();
-        let configuration_file = read_to_string(config_path)?;
+        let configuration_file = read_to_string(config_path).await?;
         let configuration_parsed = from_str(&configuration_file)?;
         let mut cert_store = RootCertStore::empty();
         cert_store.extend(TLS_SERVER_ROOTS.iter().cloned());
@@ -143,8 +140,8 @@ impl AppState {
         let cert_verifier = WebPkiServerVerifier::builder(root_store).build()?;
         let (configuration, individual_certs, wildcard_certs, certs) =
             ActiveState::build(configuration_parsed, &cert_verifier)?;
-        let dynamic_config = ArcSwap::from_pointee(configuration);
-        if let Err(e) = tx
+        let dynamic_config = Arc::new(ArcSwap::from_pointee(configuration));
+        if let Err(e) = acme_tx
             .send((individual_certs, wildcard_certs, certs.clone()))
             .await
         {
@@ -188,7 +185,6 @@ impl AppState {
             dynamic_config,
             connection_pool,
             insecure_connection_pool,
-            tx,
             cert_verifier,
             certificates,
         })

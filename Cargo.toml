@@ -27,8 +27,15 @@ log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 keidai = { path = "keidai" }
+zerocopy = { version = "0.8.55", features = ["derive"] }
 
 [profile.release.package.kekkai]
 debug = 2
 codegen-units = 1
 strip = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
