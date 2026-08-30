@@ -59,7 +59,7 @@ pub async fn run(
         125_000,
         "BLOCKLIST_V4_PREFIX",
         vec => Vec::new()
-    );
+    )?;
     let path_v6 = ofuda_path.join("ofuda_v6.bin");
     let (mut ofuda_v6, mut ofuda_v6_entries) = populate_map_from_disk!(
         ofuda_v6,
@@ -68,7 +68,7 @@ pub async fn run(
         125_000,
         "BLOCKLIST_V6_PREFIX",
         vec => Vec::new()
-    );
+    )?;
 
     loop {
         let entry = select! {

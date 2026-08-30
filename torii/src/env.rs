@@ -1,5 +1,6 @@
 use crate::acme::providers::ProviderKind;
 use crate::acme::providers::cloudflare::CloudflareProvider;
+use crate::auth::oidc::OidcProvider;
 use crate::ebpf::mihari::MihariProviderKind;
 use crate::ebpf::mihari::crowdsec::CrowdSecProvider;
 use crate::error::Error;
@@ -10,10 +11,7 @@ pub struct Config {
     pub interface: Option<String>,
     pub port: u16,
     pub host: Ipv4Addr,
-    pub oidc_issuer_url: String,
-    pub oidc_client_id: String,
-    pub oidc_client_secret: String,
-    pub oidc_callback_uri: String,
+    pub oidc_provider: Option<OidcProvider>,
     pub acme_directory_url: String,
     pub acme_provider: Option<ProviderKind>,
     pub acme_email: Option<String>,
@@ -22,7 +20,6 @@ pub struct Config {
     pub ddns: bool,
     pub mihari_interval: u64,
     pub mihari_provider: Option<MihariProviderKind>,
-    pub disk_persistence: bool,
     pub kekkai_path: String,
     pub hashira_shm_capacity: u32,
     pub ebpf_metrics: bool,
@@ -35,14 +32,15 @@ impl Config {
         let host = var("HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())
             .parse()?;
-        let oidc_issuer_url = var("OIDC_ISSUER_URL")
-            .map_err(|_| Error::Env("OIDC_ISSUER_URL is required".to_string()))?;
-        let oidc_client_id =
-            var("OIDC_CLIENT_ID").map_err(|_| Error::Env("OIDC_CLIENT_ID".to_string()))?;
-        let oidc_client_secret =
-            var("OIDC_CLIENT_SECRET").map_err(|_| Error::Env("OIDC_CLIENT_SECRET".to_string()))?;
-        let oidc_callback_uri =
-            var("OIDC_CALLBACK_URI").map_err(|_| Error::Env("OIDC_CALLBACK_URI".to_string()))?;
+        let oidc_issuer_url = var("OIDC_ISSUER_URL").ok();
+        let oidc_client_id = var("OIDC_CLIENT_ID").ok();
+        let oidc_client_secret = var("OIDC_CLIENT_SECRET").ok();
+        let oidc_callback_uri = var("OIDC_CALLBACK_URI").ok();
+        let oidc_provider = match (oidc_issuer_url, oidc_client_id, oidc_client_secret, oidc_callback_uri) {
+            (Some(oidc_issuer_url), Some(oidc_client_id), Some(oidc_client_secret), Some(oidc_callback_uri)) => Some(OidcProvider { oidc_issuer_url, oidc_client_id, oidc_client_secret, oidc_callback_uri }),
+            (None, None, None, None) => None,
+            _ => return Err(Error::Env("Incomplete OIDC config. OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_CALLBACK_URI must be set to enable OIDC".to_string()))
+        };
         let acme_provider = match var("ACME_PROVIDER").ok() {
             Some(acme_provider_string) => {
                 let acme_zone_id =
@@ -90,9 +88,6 @@ impl Config {
             Some(unkown) => return Err(Error::Env(format!("Invalid MIHARI provider: {}", unkown))),
             None => None,
         };
-        let disk_persistence = var("DISK_PERSISTENCE")
-            .map(|v| v.parse::<bool>().unwrap_or(true))
-            .unwrap_or(true);
         let kekkai_path =
             var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
         if let Err(e) = std::fs::create_dir_all(&kekkai_path) {
@@ -108,10 +103,7 @@ impl Config {
             interface,
             port,
             host,
-            oidc_issuer_url,
-            oidc_client_id,
-            oidc_client_secret,
-            oidc_callback_uri,
+            oidc_provider,
             acme_directory_url,
             acme_provider,
             acme_email,
@@ -120,7 +112,6 @@ impl Config {
             ddns,
             mihari_interval,
             mihari_provider,
-            disk_persistence,
             kekkai_path,
             hashira_shm_capacity,
             ebpf_metrics,

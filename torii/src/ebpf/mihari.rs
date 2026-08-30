@@ -79,9 +79,9 @@ pub async fn run(
     let mihari_path = PathBuf::from(kekkai_path);
 
     let path_v4 = mihari_path.join("mihari_v4.bin");
-    let (mut mihari_v4, mut mmap_v4, mut mihari_ipv4_count) = populate_map_from_disk!(mihari_v4, path_v4, Ipv4Prefix, 250_000, "MIHARI_V4", count => mihari_ipv4_count);
+    let (mut mihari_v4, mut mmap_v4, mut mihari_ipv4_count) = populate_map_from_disk!(mihari_v4, path_v4, Ipv4Prefix, 250_000, "MIHARI_V4", count => mihari_ipv4_count)?;
     let path_v6 = mihari_path.join("mihari_v6.bin");
-    let (mut mihari_v6, mut mmap_v6, mut mihari_ipv6_count) = populate_map_from_disk!(mihari_v6, path_v6, Ipv6Prefix, 250_000, "MIHARI_V6", count => mihari_ipv6_count);
+    let (mut mihari_v6, mut mmap_v6, mut mihari_ipv6_count) = populate_map_from_disk!(mihari_v6, path_v6, Ipv6Prefix, 250_000, "MIHARI_V6", count => mihari_ipv6_count)?;
     if mmap_v4.is_some() && mmap_v6.is_some() {
         interval.tick().await;
     }
@@ -136,7 +136,7 @@ pub async fn run(
                 "MIHARI_V4",
                 mmap_v4,
                 mihari_ipv4_count
-            );
+            )?;
             if let Some(mmap) = returned_pointer {
                 mmap_v4 = Some(mmap);
             }
@@ -154,7 +154,7 @@ pub async fn run(
                 "MIHARI_V6",
                 mmap_v6,
                 mihari_ipv6_count
-            );
+            )?;
             if let Some(mmap) = returned_pointer {
                 mmap_v6 = Some(mmap);
             }

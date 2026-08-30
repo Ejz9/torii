@@ -24,17 +24,16 @@ use crate::{
     error::Error,
 };
 
-pub async fn config_listener(
+pub async fn listener(
     mut dynamic_config: Arc<ArcSwap<ActiveState>>,
     cert_verifier: Arc<WebPkiServerVerifier>,
-    acme_tx: tokio::sync::mpsc::Sender<(
+    acme_tx: Option<tokio::sync::mpsc::Sender<(
         HashSet<String>,
         HashSet<String>,
         HashMap<String, Arc<CertifiedKey>>,
-    )>,
-    acme_provider: bool,
+    )>>,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
-    mihari_notify: Arc<tokio::sync::Notify>,
+    mihari_notify: Option<Arc<tokio::sync::Notify>>,
     kekkai_path: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -78,7 +77,7 @@ pub async fn config_listener(
             SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
                 Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
                     dynamic_config.store(Arc::new(config));
-                    if acme_provider {
+                    if let Some(acme_tx) = &acme_tx {
                         let _ = acme_tx
                             .send((individual_certs, wildcard_certs, custom_certs))
                             .await;
@@ -133,8 +132,10 @@ pub async fn config_listener(
                 }
             },
             SocketMessage::ReloadMihari => {
-                mihari_notify.notify_one();
-                send_message(&mut stream, SocketResponse::Success).await;
+                if let Some(mihari_notify) = &mihari_notify {
+                    mihari_notify.notify_one();
+                    send_message(&mut stream, SocketResponse::Success).await;
+                }
             }
         }
     }

@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    hash::RandomState,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::error::Error;
@@ -11,11 +14,20 @@ use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};
 use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
+use moka::future::Cache;
 use serde::Deserialize;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
-#[derive(Deserialize)]
+#[derive(Debug)]
+pub struct OidcProvider {
+    pub oidc_issuer_url: String,
+    pub oidc_client_id: String,
+    pub oidc_client_secret: String,
+    pub oidc_callback_uri: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Endpoints {
     pub issuer: String,
     pub authorization_endpoint: String,
@@ -27,7 +39,6 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
-    #[instrument(name = "oidc_discovery")]
     pub async fn discover_endpoints(issuer_url: &str) -> Result<Self, Error> {
         info!("Fetching OIDC endpoints...");
         let oidc_configuration_url = format!(
@@ -69,12 +80,21 @@ pub async fn auth_redirect(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginQuery>,
 ) -> impl IntoResponse {
+    let endpoints = state
+        .endpoints
+        .as_ref()
+        .expect("FATAL: Auth route hit without OIDC configured");
+    let oidc_provider = state
+        .config
+        .oidc_provider
+        .as_ref()
+        .expect("FATAL: Auth route hit without OIDC configured");
     let code = Uuid::new_v4().to_string();
     let uri = format!(
         "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email%20offline_access&state={}",
-        state.endpoints.authorization_endpoint,
-        state.config.oidc_client_id,
-        url::form_urlencoded::byte_serialize(state.config.oidc_callback_uri.as_bytes())
+        endpoints.authorization_endpoint,
+        oidc_provider.oidc_client_id,
+        url::form_urlencoded::byte_serialize(oidc_provider.oidc_callback_uri.as_bytes())
             .collect::<String>(),
         &code
     );
@@ -111,21 +131,37 @@ pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AuthCallbackQuery>,
 ) -> Result<impl IntoResponse, Error> {
+    let endpoints = state
+        .endpoints
+        .as_ref()
+        .expect("FATAL: Auth route hit without OIDC configured");
     if let Some(return_url) = state.csrf_cache.remove(&query.state).await {
+        let oidc_provider = state
+            .config
+            .oidc_provider
+            .as_ref()
+            .expect("FATAL: Auth route hit without OIDC configured");
         let response = reqwest::Client::new()
-            .post(&state.endpoints.token_endpoint)
+            .post(&endpoints.token_endpoint)
             .form(&[
-                ("client_id", state.config.oidc_client_id.as_str()),
-                ("client_secret", state.config.oidc_client_secret.as_str()),
+                ("client_id", oidc_provider.oidc_client_id.as_str()),
+                ("client_secret", oidc_provider.oidc_client_secret.as_str()),
                 ("code", query.code.as_str()),
                 ("grant_type", "authorization_code"),
-                ("redirect_uri", state.config.oidc_callback_uri.as_str()),
+                ("redirect_uri", oidc_provider.oidc_callback_uri.as_str()),
             ])
             .send()
             .await?
             .json::<TokenResponse>()
             .await?;
-        let valid_claims = validate_token(state.clone(), &response.id_token).await?;
+        let valid_claims = validate_token(
+            &state.limiter_cache,
+            endpoints,
+            &state.jwks_cache,
+            oidc_provider,
+            &response.id_token,
+        )
+        .await?;
         if response.expires_in > 1800 {
             if !TTL_WARNED.swap(true, Ordering::Relaxed) {
                 warn!(
@@ -163,24 +199,27 @@ pub struct Claims {
     pub groups: Option<Vec<String>>,
 }
 
-#[instrument(skip(state, token), err)]
-pub async fn validate_token(state: Arc<AppState>, token: &str) -> Result<Claims, Error> {
+#[instrument(skip(token), err)]
+pub async fn validate_token(
+    limiter_cache: &Cache<String, ()>,
+    endpoints: &Endpoints,
+    jwks_cache: &Cache<String, DecodingKey>,
+    oidc_provider: &OidcProvider,
+    token: &str,
+) -> Result<Claims, Error> {
     let header = decode_header(&token)?;
     let kid = header.kid.ok_or(Error::InvalidKeyId)?;
-    let mut key_wrapper = state.jwks_cache.get(&kid).await;
+    let mut key_wrapper = jwks_cache.get(&kid).await;
     if key_wrapper.is_none() {
-        if !state.limiter_cache.contains_key("jwks_limiter") {
-            state
-                .limiter_cache
-                .insert("jwks_limiter".to_string(), ())
-                .await;
-            fetch_jwks(state.clone()).await?;
+        if !limiter_cache.contains_key("jwks_limiter") {
+            limiter_cache.insert("jwks_limiter".to_string(), ()).await;
+            fetch_jwks(endpoints, jwks_cache).await?;
         }
-        key_wrapper = state.jwks_cache.get(&kid).await;
+        key_wrapper = jwks_cache.get(&kid).await;
     }
     let key = key_wrapper.ok_or(Error::InvalidKeyId)?;
     let mut validation = Validation::new(header.alg);
-    validation.set_audience(&[state.config.oidc_client_id.clone()]);
+    validation.set_audience(&[oidc_provider.oidc_client_id.clone()]);
     Ok(decode::<Claims>(&token, &key, &validation)?.claims)
 }
 
@@ -219,9 +258,11 @@ pub struct EcKey {
     y: String,
 }
 
-#[instrument(skip(state), name = "jwks_refresh")]
-pub async fn fetch_jwks(state: Arc<AppState>) -> Result<(), Error> {
-    let response = reqwest::get(state.endpoints.jwks_uri.to_string())
+pub async fn fetch_jwks(
+    endpoints: &Endpoints,
+    jwks_cache: &Cache<String, DecodingKey>,
+) -> Result<(), Error> {
+    let response = reqwest::get(endpoints.jwks_uri.to_string())
         .await?
         .json::<Jwks>()
         .await?;
@@ -234,8 +275,7 @@ pub async fn fetch_jwks(state: Arc<AppState>) -> Result<(), Error> {
                         continue;
                     }
                 }
-                state
-                    .jwks_cache
+                jwks_cache
                     .insert(
                         rsa_data.kid,
                         DecodingKey::from_rsa_components(&rsa_data.n, &rsa_data.e)?,
@@ -248,8 +288,7 @@ pub async fn fetch_jwks(state: Arc<AppState>) -> Result<(), Error> {
                         continue;
                     }
                 }
-                state
-                    .jwks_cache
+                jwks_cache
                     .insert(
                         ec_data.kid,
                         DecodingKey::from_ec_components(&ec_data.x, &ec_data.y)?,

@@ -235,6 +235,7 @@ macro_rules! insert_bulk {
 #[macro_export]
 macro_rules! populate_map_from_disk {
     ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, count => $count:expr) => {{
+        use anyhow::Context;
         let task = tokio::task::spawn_blocking(move || {
             let mut file = None;
             let mut current_count = $count;
@@ -249,9 +250,10 @@ macro_rules! populate_map_from_disk {
             ($map, file, current_count)
         })
         .await;
-        task.expect(concat!("Boot task panicked for ", $map_name))
+        task.context(concat!("Boot task panicked for ", $map_name))
     }};
     ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, vec => $list:expr) => {{
+        use anyhow::Context;
         let task = tokio::task::spawn_blocking(move || {
             let mut current_count = 0;
             let mut working_vec = $list;
@@ -272,13 +274,14 @@ macro_rules! populate_map_from_disk {
             ($map, working_vec)
         })
         .await;
-        task.expect(concat!("Boot task panicked for ", $map_name))
+        task.context(concat!("Boot task panicked for ", $map_name))
     }};
 }
 
 #[macro_export]
 macro_rules! sync_map_to_disk {
     ($map:expr, $path:expr, $prefix_type:ty, $incoming:expr, $limit:expr, $map_name:expr, $mmap_opt:expr, $count:expr) => {{
+        use anyhow::Context;
         let mut current_count = $count;
         let old_mmap = $mmap_opt.take();
         let task = tokio::task::spawn_blocking(move || {
@@ -298,7 +301,7 @@ macro_rules! sync_map_to_disk {
             ($map, mmap, current_count)
         })
         .await;
-        task.expect(concat!("Sync task panciked at ", $map_name))
+        task.context(concat!("Sync task panciked at ", $map_name))
     }};
 }
 
@@ -327,7 +330,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 pub async fn run(
     state: Arc<AppState>,
     ofuda_rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
-    mihari_notify: Arc<tokio::sync::Notify>,
+    mihari_notify: Option<Arc<tokio::sync::Notify>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,
@@ -427,7 +430,9 @@ pub async fn run(
         state.config.kekkai_path.clone(),
         cancel_token.clone(),
     ));
-    if let Some(mihari_provider) = &state.config.mihari_provider {
+    if let (Some(mihari_provider), Some(mihari_notify)) =
+        (&state.config.mihari_provider, mihari_notify)
+    {
         child_workers.spawn(mihari::run(
             mihari_provider.clone(),
             state.config.mihari_interval,

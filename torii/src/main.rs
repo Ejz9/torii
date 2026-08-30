@@ -14,6 +14,7 @@ use rustls::ServerConfig;
 use rustls::sign::CertifiedKey;
 use tokio::fs::read_to_string;
 use tokio::select;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -47,15 +48,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 
-// Need to drop mpsc of workers that don't start or fail(fail = std exit?).
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("Setting default subscriber failed");
-    tracing_log::LogTracer::init().expect("Failed to initialize log tracer");
+    tracing::subscriber::set_global_default(subscriber)?;
+    tracing_log::LogTracer::init()?;
     let cli = Cli::parse();
     match cli.command {
         Commands::Start => {
@@ -74,12 +73,21 @@ async fn main() -> anyhow::Result<()> {
             let network_token = root_token.child_token();
             let mut worker_set: JoinSet<anyhow::Result<()>> = JoinSet::new();
             let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
-            let (acme_tx, acme_rx) = mpsc::channel::<(
-                HashSet<String>,
-                HashSet<String>,
-                HashMap<String, Arc<CertifiedKey>>,
-            )>(20);
-            let mihari_notify = Arc::new(Notify::new());
+            let (acme_tx, acme_rx) = if config.acme_provider.is_some() {
+                let (tx, rx) = mpsc::channel::<(
+                    HashSet<String>,
+                    HashSet<String>,
+                    HashMap<String, Arc<CertifiedKey>>,
+                )>(20);
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
+            let mihari_notify = if config.mihari_provider.is_some() {
+                Some(Arc::new(Notify::new()))
+            } else {
+                None
+            };
             let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
             let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
                 .max_capacity(100_000)
@@ -97,23 +105,22 @@ async fn main() -> anyhow::Result<()> {
             worker_set.spawn(kekkai_manager::run(
                 state.clone(),
                 ofuda_rx,
-                Arc::clone(&mihari_notify),
+                mihari_notify.clone(),
                 hashira_tx.clone(),
                 hashira_rx,
                 interface,
                 worker_token.clone(),
             ));
-            worker_set.spawn(socket::config_listener(
+            worker_set.spawn(socket::listener(
                 Arc::clone(&state.dynamic_config),
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
-                state.config.acme_provider.is_some(),
                 ofuda_tx,
-                mihari_notify,
+                mihari_notify.clone(),
                 state.config.kekkai_path.clone(),
                 worker_token.clone(),
             ));
-            if let Some(acme_provider) = state.config.acme_provider.clone() {
+            if let (Some(acme_provider), Some(acme_rx)) = (state.config.acme_provider.clone(), acme_rx) {
                 worker_set.spawn(dns::acme_worker(
                     state.clone(),
                     acme_provider.clone(),
@@ -127,25 +134,24 @@ async fn main() -> anyhow::Result<()> {
                         worker_token.clone(),
                     ));
                 }
-            } else {
-                drop(acme_rx);
             }
-            fetch_jwks(state.clone())
-                .await
-                .expect("FATAL: Failed to fetch JWKS from OIDC provider");
+            if let Some(endpoints) = &state.endpoints {
+                fetch_jwks(&endpoints, &state.jwks_cache).await?;
+            }
             let addr = format!("{}:{}", state.config.host, state.config.port);
-            let public_routes = Router::new()
-                .route("/auth/login", any(auth_redirect))
-                .route("/auth/callback", any(auth_callback));
             let private_routes = Router::new()
                 .route("/api/tunnel-key", any(exchange_tunnel_key))
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
-            let app = Router::new()
-                .merge(public_routes)
-                .merge(private_routes)
-                .with_state(state.clone());
+            let mut app = Router::new().merge(private_routes);
+            if state.config.oidc_provider.is_some() {
+                let auth_routes = Router::new()
+                    .route("/auth/login", any(auth_redirect))
+                    .route("/auth/callback", any(auth_callback));
+                app = app.merge(auth_routes)
+            };
+            let app = app.with_state(state.clone());
             let mut config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
@@ -153,12 +159,48 @@ async fn main() -> anyhow::Result<()> {
                 ))));
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
-            let listener = TcpListener::bind(&addr)
-                .await
-                .expect("FATAL: Failed to bind to port or port is already in use");
+            let listener = TcpListener::bind(&addr).await?;
             info!("Listening on {}...", addr);
 
-            serve(listener, app, acceptor, l4_rate_limiter, hashira_tx).await
+            let server = tokio::spawn(serve(
+                listener,
+                app,
+                acceptor,
+                l4_rate_limiter,
+                hashira_tx,
+                network_token.clone(),
+            ));
+            select! {
+                _ = tokio::signal::ctrl_c() => {}
+                Some(result) = worker_set.join_next() => {
+                    match result {
+                        Ok(Ok(())) => {
+                            error!("FATAL: A critical worker thread exited unexpectedly without throwing an error");
+                        }
+                        Ok(Err(e)) => {
+                            error!("FATAL: A worker thread crashed: {e:#}");
+                        }
+                        Err(e) => {
+                            if e.is_panic() {
+                                error!("FATAL: A worker thread encountered a panic");
+                            } else {
+                                error!("FATAL: A worker thread failed to execute: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            info!("Shutdown signal recieved...");
+            network_token.cancel();
+            let _ = server.await?;
+            info!("Network listener stopped");
+            worker_token.cancel();
+            while let Some(res) = worker_set.join_next().await {
+                if let Err(e) = res {
+                    error!("Worker error during shutdown {e}");
+                }
+            }
+            info!("Torii completed shutdown");
         }
         Commands::Reload => {
             let file_string = read_to_string(cli.config)
