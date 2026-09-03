@@ -235,6 +235,7 @@ macro_rules! insert_bulk {
 #[macro_export]
 macro_rules! populate_map_from_disk {
     ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, count => $count:expr) => {{
+        use anyhow::Context;
         let task = tokio::task::spawn_blocking(move || {
             let mut file = None;
             let mut current_count = $count;
@@ -249,9 +250,10 @@ macro_rules! populate_map_from_disk {
             ($map, file, current_count)
         })
         .await;
-        task.expect(concat!("Boot task panicked for ", $map_name))
+        task.context(concat!("Boot task panicked for ", $map_name))
     }};
     ($map:expr, $path:expr, $prefix_type:ty, $limit:expr, $map_name:expr, vec => $list:expr) => {{
+        use anyhow::Context;
         let task = tokio::task::spawn_blocking(move || {
             let mut current_count = 0;
             let mut working_vec = $list;
@@ -272,13 +274,14 @@ macro_rules! populate_map_from_disk {
             ($map, working_vec)
         })
         .await;
-        task.expect(concat!("Boot task panicked for ", $map_name))
+        task.context(concat!("Boot task panicked for ", $map_name))
     }};
 }
 
 #[macro_export]
 macro_rules! sync_map_to_disk {
     ($map:expr, $path:expr, $prefix_type:ty, $incoming:expr, $limit:expr, $map_name:expr, $mmap_opt:expr, $count:expr) => {{
+        use anyhow::Context;
         let mut current_count = $count;
         let old_mmap = $mmap_opt.take();
         let task = tokio::task::spawn_blocking(move || {
@@ -298,7 +301,7 @@ macro_rules! sync_map_to_disk {
             ($map, mmap, current_count)
         })
         .await;
-        task.expect(concat!("Sync task panciked at ", $map_name))
+        task.context(concat!("Sync task panciked at ", $map_name))
     }};
 }
 
@@ -327,7 +330,7 @@ pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
 pub async fn run(
     state: Arc<AppState>,
     ofuda_rx: tokio::sync::mpsc::Receiver<OfudaEntry>,
-    mihari_rx: tokio::sync::mpsc::Receiver<Option<String>>,
+    mihari_notify: Option<Arc<tokio::sync::Notify>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
     interface: String,
@@ -398,7 +401,9 @@ pub async fn run(
         error!("FATAL: Failed to extract eBPF map METRICS from memory");
         std::process::exit(1);
     };
-    child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
+    if state.config.ebpf_metrics {
+        child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
+    }
     /*
     if state.remote_sidecars {
         let addr = format!(
@@ -416,6 +421,7 @@ pub async fn run(
         blocklist_v6,
         hashira_tx,
         hashira_rx,
+        cancel_token.clone(),
     ));
     child_workers.spawn(ofuda::run(
         ofuda_rx,
@@ -424,14 +430,17 @@ pub async fn run(
         state.config.kekkai_path.clone(),
         cancel_token.clone(),
     ));
-    if let Some(mihari_provider) = &state.config.mihari_provider {
+    if let (Some(mihari_provider), Some(mihari_notify)) =
+        (&state.config.mihari_provider, mihari_notify)
+    {
         child_workers.spawn(mihari::run(
             mihari_provider.clone(),
             state.config.mihari_interval,
             state.config.kekkai_path.clone(),
             mihari_v4,
             mihari_v6,
-            mihari_rx,
+            mihari_notify,
+            cancel_token.clone(),
         ));
     }
     cancel_token.cancelled().await;

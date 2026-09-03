@@ -19,10 +19,12 @@ use tokio::{fs, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::acme::providers::ProviderKind;
 use crate::{error::Error, state::AppState};
 
 pub async fn acme_worker(
     state: Arc<AppState>,
+    acme_provider: ProviderKind,
     mut rx: tokio::sync::mpsc::Receiver<(
         HashSet<String>,
         HashSet<String>,
@@ -52,9 +54,9 @@ pub async fn acme_worker(
                 active_map.extend(custom_certs);
                 state.certificates.store(Arc::new(active_map));
 
-                sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await;
+                sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await;
             }
-            _ = sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
+            _ = sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
         }
     }
     Ok(())
@@ -62,6 +64,7 @@ pub async fn acme_worker(
 
 async fn refresh_certificates(
     state: &AppState,
+    acme_provider: &ProviderKind,
     individual_certs: HashSet<String>,
     wildcard_certs: HashSet<String>,
     custom_certs: &HashSet<String>,
@@ -91,7 +94,7 @@ async fn refresh_certificates(
     let mut encountered_error = false;
     for domain in needs_refresh {
         let certificate =
-            match process_domain(&state, domain.to_string(), &wildcard_certs, &account).await {
+            match process_domain(&state, acme_provider, domain.to_string(), &wildcard_certs, &account).await {
                 Ok(cert) => cert,
                 Err(e) => {
                     error!("Failed to process domain {}: {}", domain, e);
@@ -348,6 +351,7 @@ async fn get_or_create_account(state: &AppState) -> Result<Account, Error> {
 
 async fn process_domain(
     state: &AppState,
+    acme_provider: &ProviderKind,
     domain: String,
     wildcard_certs: &HashSet<String>,
     account: &Account,
@@ -391,9 +395,7 @@ async fn process_domain(
         let challenge_token = challenge.key_authorization();
         let txt_value = challenge_token.dns_value();
 
-        let record_id = state
-            .config
-            .acme_provider
+        let record_id = acme_provider
             .create_txt_record(&txt_record_name, &txt_value)
             .await?;
         cleanup_records.push((txt_record_name, record_id));
@@ -402,9 +404,7 @@ async fn process_domain(
     }
     let status = order.poll_ready(&RetryPolicy::default()).await?;
     for (_, record_id) in cleanup_records {
-        if let Err(e) = state
-            .config
-            .acme_provider
+        if let Err(e) = acme_provider
             .delete_txt_record(&record_id)
             .await
         {

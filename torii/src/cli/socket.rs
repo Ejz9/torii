@@ -24,16 +24,16 @@ use crate::{
     error::Error,
 };
 
-pub async fn config_listener(
+pub async fn listener(
     mut dynamic_config: Arc<ArcSwap<ActiveState>>,
     cert_verifier: Arc<WebPkiServerVerifier>,
-    acme_tx: tokio::sync::mpsc::Sender<(
+    acme_tx: Option<tokio::sync::mpsc::Sender<(
         HashSet<String>,
         HashSet<String>,
         HashMap<String, Arc<CertifiedKey>>,
-    )>,
+    )>>,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
-    mihari_tx: tokio::sync::mpsc::Sender<Option<String>>,
+    mihari_notify: Option<Arc<tokio::sync::Notify>>,
     kekkai_path: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -77,12 +77,16 @@ pub async fn config_listener(
             SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
                 Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
                     dynamic_config.store(Arc::new(config));
-                    if let Err(e) = acme_tx
-                        .send((individual_certs, wildcard_certs, custom_certs))
+                    if let Some(acme_tx) = &acme_tx {
+                        let _ = acme_tx
+                            .send((individual_certs, wildcard_certs, custom_certs))
+                            .await;
+                    } else {
+                        send_message(
+                            &mut stream,
+                            SocketResponse::FatalError("ACME provider disabled".to_string()),
+                        )
                         .await
-                    {
-                        error!("FATAL: ACME worker thread is dead: {}", e);
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
                     }
                     send_message(&mut stream, SocketResponse::Success).await
                 }
@@ -127,19 +131,11 @@ pub async fn config_listener(
                     send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
                 }
             },
-            SocketMessage::CommandMihari { action } => {
-                if action.eq_ignore_ascii_case("stop") {
-                    if let Err(e) = mihari_tx.send(None).await {
-                        error!("Failed to send shutdown signal to mihari: {e}");
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                    }
-                } else {
-                    if let Err(e) = mihari_tx.send(Some(action)).await {
-                        error!("Failed to send action to mihari: {e}");
-                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                    }
+            SocketMessage::ReloadMihari => {
+                if let Some(mihari_notify) = &mihari_notify {
+                    mihari_notify.notify_one();
+                    send_message(&mut stream, SocketResponse::Success).await;
                 }
-                send_message(&mut stream, SocketResponse::Success).await;
             }
         }
     }
@@ -151,7 +147,7 @@ pub enum SocketMessage {
     ReloadConfig(ToriiConfig),
     UpdateBans(BansArgs),
     ListBans(IpFilter),
-    CommandMihari { action: String },
+    ReloadMihari,
 }
 
 #[derive(Serialize, Deserialize)]

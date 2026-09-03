@@ -14,10 +14,7 @@ pub enum Commands {
     Reload,
     #[command(arg_required_else_help = true)]
     Bans(BansArgs),
-    Threats {
-        #[arg(default_value = "refresh")]
-        action: String,
-    },
+    ReloadThreats,
 }
 
 #[derive(clap::Args, Clone, serde::Serialize, serde::Deserialize)]

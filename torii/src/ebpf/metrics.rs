@@ -14,6 +14,7 @@ pub async fn run(
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
     loop {
         select! {
+            biased;
             _ = cancel_token.cancelled() => {
                 info!("eBPF Metrics recieved shutdown signal. Halting.");
                 break;

@@ -23,11 +23,11 @@ use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, RootCertStore, pki_types};
 use tokio::sync::mpsc;
 use toml::from_str;
-use tracing::{error, info};
+use tracing::info;
 use webpki_roots::TLS_SERVER_ROOTS;
 pub struct AppState {
     pub config: Config,
-    pub endpoints: Endpoints,
+    pub endpoints: Option<Endpoints>,
     pub csrf_cache: Cache<String, String>,
     pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
@@ -66,15 +66,19 @@ impl AppState {
     pub async fn new(
         config: Config,
         config_path: String,
-        acme_tx: mpsc::Sender<(
-            HashSet<String>,
-            HashSet<String>,
-            HashMap<String, Arc<CertifiedKey>>,
-        )>,
+        acme_tx: Option<
+            mpsc::Sender<(
+                HashSet<String>,
+                HashSet<String>,
+                HashMap<String, Arc<CertifiedKey>>,
+            )>,
+        >,
     ) -> Result<Self, Error> {
-        let endpoints = Endpoints::discover_endpoints(&config.oidc_issuer_url)
-            .await
-            .expect("FATAL: Failed to fetch OIDC Discovery document");
+        let endpoints = if let Some(oidc_provider) = &config.oidc_provider {
+            Some(Endpoints::discover_endpoints(&oidc_provider.oidc_issuer_url).await?)
+        } else {
+            None
+        };
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -136,17 +140,14 @@ impl AppState {
         let (configuration, individual_certs, wildcard_certs, certs) =
             ActiveState::build(configuration_parsed, &cert_verifier)?;
         let dynamic_config = Arc::new(ArcSwap::from_pointee(configuration));
-        if let Err(e) = acme_tx
-            .send((individual_certs, wildcard_certs, certs.clone()))
-            .await
-        {
-            error!("FATAL: ACME worker thread is dead: {}", e);
-            std::process::exit(1);
+        if let Some(acme_tx) = acme_tx {
+            let _ = acme_tx
+                .send((individual_certs, wildcard_certs, certs.clone()))
+                .await;
         }
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .expect("no native root CA certificates found")
+            .with_native_roots()?
             .https_or_http()
             .enable_http1()
             .enable_http2()

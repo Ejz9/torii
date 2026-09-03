@@ -61,7 +61,7 @@ pub async fn run(
     hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
     cancel_token: CancellationToken,
-) {
+) -> anyhow::Result<()> {
     let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
     let (shm_register_tx, mut shm_register_rx) =
         tokio::sync::mpsc::channel::<LocalSidecarHandle>(64);
@@ -90,6 +90,7 @@ pub async fn run(
         async move {
             loop {
                 let entry = select! {
+                    biased;
                     _ = cancel_token.cancelled() => break,
                     res = hashira_rx.recv() => {
                         let Some(entry) = res else { break };
@@ -122,23 +123,19 @@ pub async fn run(
             Ok(())
         }
     });
-    child_workers.spawn_blocking({
+    child_workers.spawn({
         let cancel_token = cancel_token.clone();
-        move || {
+        async move {
             let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
             let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
             loop {
-                if cancel_token.is_cancelled() {
-                    info!("Hashira SHM scanner exiting");
-                    break;
-                }
-                while let Ok(new_sidecar) = shm_register_rx.try_recv() {
-                    sidecars.push(new_sidecar);
-                }
-                if sidecars.is_empty() {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
+                select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        info!("IPS exiting");
+                        break;
+                    }
+                };
 
                 let mut events_processed = 0;
                 for sidecar in sidecars.iter_mut() {
@@ -189,7 +186,7 @@ pub async fn run(
 
                     let timeout = libc::timespec {
                         tv_sec: 0,
-                        tv_nsec: 100_000_000
+                        tv_nsec: 100_000_000,
                     };
 
                     unsafe {
@@ -208,6 +205,7 @@ pub async fn run(
         }
     });
     cancel_token.cancelled().await;
+    Ok(())
     /*
     if remote_sidecars {
         let socket = UdpSocket::bind(addr);
