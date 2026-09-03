@@ -90,6 +90,7 @@ pub async fn run(
         async move {
             loop {
                 let entry = select! {
+                    biased;
                     _ = cancel_token.cancelled() => break,
                     res = hashira_rx.recv() => {
                         let Some(entry) = res else { break };
@@ -122,23 +123,19 @@ pub async fn run(
             Ok(())
         }
     });
-    child_workers.spawn_blocking({
+    child_workers.spawn({
         let cancel_token = cancel_token.clone();
-        move || {
+        async move {
             let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
             let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
             loop {
-                if cancel_token.is_cancelled() {
-                    info!("Hashira SHM scanner exiting");
-                    break;
-                }
-                while let Ok(new_sidecar) = shm_register_rx.try_recv() {
-                    sidecars.push(new_sidecar);
-                }
-                if sidecars.is_empty() {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
+                select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        info!("IPS exiting");
+                        break;
+                    }
+                };
 
                 let mut events_processed = 0;
                 for sidecar in sidecars.iter_mut() {

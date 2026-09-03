@@ -72,6 +72,7 @@ pub async fn run(
 
     loop {
         let entry = select! {
+            biased;
             _ = cancel_token.cancelled() => {
                 info!("eBPF Ofuda recieved shutdown signal. Halting.");
                 break;

@@ -120,7 +120,9 @@ async fn main() -> anyhow::Result<()> {
                 state.config.kekkai_path.clone(),
                 worker_token.clone(),
             ));
-            if let (Some(acme_provider), Some(acme_rx)) = (state.config.acme_provider.clone(), acme_rx) {
+            if let (Some(acme_provider), Some(acme_rx)) =
+                (state.config.acme_provider.clone(), acme_rx)
+            {
                 worker_set.spawn(dns::acme_worker(
                     state.clone(),
                     acme_provider.clone(),
@@ -161,6 +163,10 @@ async fn main() -> anyhow::Result<()> {
             let acceptor = TlsAcceptor::from(Arc::new(config));
             let listener = TcpListener::bind(&addr).await?;
             info!("Listening on {}...", addr);
+
+            // Add hashira use in the main server worker or for specialized / auth endpoints.
+            // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
+            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii.
 
             let server = tokio::spawn(serve(
                 listener,
