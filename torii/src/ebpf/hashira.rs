@@ -15,6 +15,7 @@ use governor::{
 use keidai::{BufferHeader, ConnectionEvent};
 use memmap2::MmapMut;
 use moka::{Expiry, sync::Cache};
+use quinn::ServerConfig;
 use tokio::{
     select,
     sync::mpsc::{self, Receiver, Sender},
@@ -128,6 +129,7 @@ pub async fn run(
         async move {
             let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
             let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
+            let server_config = ServerConfig::with_crypto(Arc::new());
             loop {
                 select! {
                     biased;
@@ -135,6 +137,7 @@ pub async fn run(
                         info!("IPS exiting");
                         break;
                     }
+
                 };
 
                 let mut events_processed = 0;
@@ -223,7 +226,7 @@ pub async fn run(
 
 type IpLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
-struct PolicyEngine {
+pub struct PolicyEngine {
     ban_v4: Cache<u32, Duration>,
     ban_v6: Cache<[u8; 16], Duration>,
     offense_history: Cache<IpAddr, u32>,

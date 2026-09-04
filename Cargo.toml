@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["torii", "kekkai", "tegata", "kakehashi", "keidai"]
-default-members = ["torii", "tegata", "kakehashi", "keidai"]
+members = ["torii", "kekkai", "tegata", "shinshi", "keidai"]
+default-members = ["torii", "tegata", "shinshi", "keidai"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,6 +28,10 @@ tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 keidai = { path = "keidai" }
 zerocopy = { version = "0.8.55", features = ["derive"] }
+quinn = { version = "0.11.11", default-features = false, features = [
+    "aws-lc-rs",
+    "rustls-aws-lc-rs",
+] }
 
 [profile.release.package.kekkai]
 debug = 2

@@ -47,6 +47,10 @@ tempfile = "3.27.0"
 aho-corasick = "1.1.5"
 governor = "0.10.4"
 tokio-util = "0.7.19"
+quinn = { workspace = true }
+rcgen = { version = "0.14.10", default-features = false, features = [
+    "aws_lc_rs",
+] }
 
 [build-dependencies]
 anyhow = { workspace = true, optional = true }

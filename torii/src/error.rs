@@ -39,7 +39,7 @@ pub enum Error {
     #[error("Invalid internet domain. Should contain at minimum base.tld")]
     InvalidDomain,
     #[error(transparent)]
-    InvalidPem(#[from] x509_parser::error::PEMError),
+    InvalidPem(#[from] x509_parser::nom::Err<x509_parser::error::PEMError>),
     #[error(transparent)]
     InvalidX509(#[from] x509_parser::error::X509Error),
     #[error(transparent)]
@@ -69,6 +69,10 @@ pub enum Error {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("HTTP Error {0}: {1}")]
     Http(StatusCode, &'static str),
+    #[error(transparent)]
+    FromUtf8(#[from] std::string::FromUtf8Error),
+    #[error(transparent)]
+    Rcgen(#[from] rcgen::Error),
 }
 
 impl IntoResponse for Error {
@@ -155,6 +159,12 @@ impl IntoResponse for Error {
                 (StatusCode::INTERNAL_SERVER_ERROR, "SystemTime Error").into_response()
             }
             Error::Http(status, message) => (status, message).into_response(),
+            Error::FromUtf8(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Parsing Error").into_response()
+            }
+            Error::Rcgen(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Certificate Error").into_response()
+            }
         }
     }
 }

@@ -10,6 +10,7 @@ use std::net::Ipv4Addr;
 pub struct Config {
     pub interface: Option<String>,
     pub port: u16,
+    pub quic_event_port: u16,
     pub host: Ipv4Addr,
     pub oidc_provider: Option<OidcProvider>,
     pub acme_directory_url: String,
@@ -23,12 +24,16 @@ pub struct Config {
     pub kekkai_path: String,
     pub hashira_shm_capacity: u32,
     pub ebpf_metrics: bool,
+    pub sando_path: String,
 }
 
 impl Config {
     pub fn new() -> Result<Self, Error> {
         let interface = var("INTERFACE").ok();
         let port = var("PORT").unwrap_or_else(|_| "443".to_string()).parse()?;
+        let quic_event_port = var("QUIC_EVENT_PORT")
+            .unwrap_or_else(|_| "10_000".to_string())
+            .parse()?;
         let host = var("HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())
             .parse()?;
@@ -63,7 +68,6 @@ impl Config {
             None => None,
         };
         let acme_email = var("ACME_EMAIL").ok();
-        let cert_path = var("CERT_PATH").unwrap_or_else(|_| "/var/lib/torii/certs/".to_string());
         let custom_ca_path = var("CUSTOM_CA_PATH").ok();
         let acme_directory_url = var("ACME_DIRECTORY_URL")
             .unwrap_or_else(|_| instant_acme::LetsEncrypt::Production.url().to_owned());
@@ -88,10 +92,21 @@ impl Config {
             Some(unkown) => return Err(Error::Env(format!("Invalid MIHARI provider: {}", unkown))),
             None => None,
         };
-        let kekkai_path =
-            var("KEKKAI_PATH").unwrap_or_else(|_| "/var/lib/torii/kekkai/".to_string());
+        let data_path = var("DATA_PATH").unwrap_or_else(|_| "/var/lib/torii/".to_string());
+        if let Err(e) = std::fs::create_dir_all(&data_path) {
+            return Err(Error::Env(format!("Failed to create DATA_PATH: {e}")));
+        }
+        let kekkai_path = format!("{data_path}kekkai/");
         if let Err(e) = std::fs::create_dir_all(&kekkai_path) {
-            return Err(Error::Env(format!("Failed to create KEKKAI_PATH: {e}")));
+            return Err(Error::Env(format!("Failed to create DATA_PATH: {e}")));
+        }
+        let cert_path = format!("{data_path}certs/");
+        if let Err(e) = std::fs::create_dir_all(&cert_path) {
+            return Err(Error::Env(format!("Failed to create DATA_PATH: {e}")));
+        }
+        let sando_path = format!("{data_path}sando/");
+        if let Err(e) = std::fs::create_dir_all(&sando_path) {
+            return Err(Error::Env(format!("Failed to create DATA_PATH: {e}")));
         }
         let hashira_shm_capacity = var("HASHIRA_SHM_CAPACITY")
             .unwrap_or_else(|_| "100000".to_string())
@@ -102,6 +117,7 @@ impl Config {
         Ok(Config {
             interface,
             port,
+            quic_event_port,
             host,
             oidc_provider,
             acme_directory_url,
@@ -115,6 +131,7 @@ impl Config {
             kekkai_path,
             hashira_shm_capacity,
             ebpf_metrics,
+            sando_path,
         })
     }
 }

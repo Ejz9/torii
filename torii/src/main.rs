@@ -6,6 +6,7 @@ mod env;
 mod error;
 mod proxy;
 mod state;
+mod tunnel;
 use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;

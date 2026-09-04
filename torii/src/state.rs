@@ -120,10 +120,9 @@ impl AppState {
                         "Failed to parse custom root DER bytes".to_string(),
                     ));
                 };
-                let not_after = cert.tbs_certificate.validity.not_after;
-                if (not_after.timestamp() as u64)
-                    < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-                    || (not_after.timestamp() as u64)
+                let not_after = cert.tbs_certificate.validity.not_after.timestamp() as u64;
+                if not_after < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+                    || not_after
                         < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                             + Duration::from_hours(24 * 30).as_secs()
                 {
