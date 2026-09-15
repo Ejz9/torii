@@ -269,6 +269,8 @@ pub struct RouteConfig {
 #[derive(Clone)]
 pub struct ActiveRoute {
     pub upstream: http::Uri,
+    pub upstream_clean: String,
+    pub upstream_host_header: String,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
     pub allowed_asset_paths: Vec<String>,
@@ -278,8 +280,17 @@ pub struct ActiveRoute {
 impl TryFrom<RouteConfig> for ActiveRoute {
     type Error = Error;
     fn try_from(config: RouteConfig) -> Result<Self, Self::Error> {
+        let upstream: http::Uri = config.upstream.parse()?;
+        let upstream_clean = config.upstream.trim_end_matches('/').to_string();
+        let upstream_host_header = upstream
+            .authority()
+            .map(|a| a.as_str())
+            .unwrap_or("localhost")
+            .to_string();
         Ok(ActiveRoute {
-            upstream: config.upstream.parse()?,
+            upstream,
+            upstream_clean,
+            upstream_host_header,
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
             allowed_asset_paths: config.allowed_asset_paths,

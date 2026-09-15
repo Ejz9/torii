@@ -129,7 +129,7 @@ pub async fn run(
         async move {
             let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
             let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
-            let server_config = ServerConfig::with_crypto(Arc::new());
+            //let server_config = ServerConfig::with_crypto(Arc::new());
             loop {
                 select! {
                     biased;

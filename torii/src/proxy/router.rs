@@ -30,36 +30,30 @@ pub async fn handle_any(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let upstream_base = matched_route.route.upstream.to_string();
-    let upstream_clean = upstream_base.trim_end_matches('/');
-    let upstream_uri = upstream_base.parse::<hyper::Uri>()?;
-    let upstream_host_header = upstream_uri
-        .authority()
-        .map(|a| a.as_str())
-        .unwrap_or("localhost")
-        .to_string();
-
     let safe_path = if matched_route.catch_all.starts_with("/") {
         matched_route.catch_all.clone()
     } else {
         format!("/{}", matched_route.catch_all)
     };
 
-    let query = parts.uri.query().unwrap_or("");
-    let query_suffix = if query.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", query)
-    };
+    let query = parts.uri.query();
 
-    let new_uri = format!("{}{}{}", upstream_clean, safe_path, query_suffix);
+    let new_uri = match query {
+        Some(q) if !q.is_empty() => format!(
+            "{}{}{}",
+            matched_route.route.upstream_clean,
+            safe_path,
+            format_args!("?{}", q)
+        ),
+        _ => format!("{}{}", matched_route.route.upstream_clean, safe_path),
+    };
     let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
     parts.version = hyper::Version::HTTP_11;
     inject_headers(
         &mut parts.headers,
         source_ip,
-        &upstream_host_header,
+        &matched_route.route.upstream_host_header,
         &host_string,
     );
     let req = Request::from_parts(parts, body);
@@ -72,6 +66,31 @@ pub async fn handle_any(
 
     match pool.request(req).await {
         Ok(mut res) => {
+            let headers = res.headers_mut();
+            headers.remove(hyper::header::CONNECTION);
+            headers.remove(hyper::header::UPGRADE);
+            headers.remove(HeaderName::from_static("keep-alive"));
+            headers.insert(
+                hyper::header::CONNECTION,
+                HeaderValue::from_static("keep-alive"),
+            );
+            headers.insert(
+                HeaderName::from_static("keep-alive"),
+                HeaderValue::from_static("timeout=65"),
+            );
+            headers.insert(hyper::header::SERVER, HeaderValue::from_static("Torii"));
+            headers.insert(
+                hyper::header::STRICT_TRANSPORT_SECURITY,
+                HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+            );
+            headers.insert(
+                hyper::header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            headers.insert(
+                hyper::header::X_FRAME_OPTIONS,
+                HeaderValue::from_static("SAMEORIGIN"),
+            );
             if res.status() == StatusCode::SWITCHING_PROTOCOLS {
                 if let Some(client_intent) = upgrade_intent {
                     let server_intent = hyper::upgrade::on(&mut res);
@@ -95,7 +114,7 @@ pub async fn handle_any(
             Ok(res.map(|body| Body::new(body)).into_response())
         }
         Err(e) => {
-            error!("URI: {}, Error: {}", new_uri, e);
+            debug!("URI: {}, Error: {}", new_uri, e);
             Err(Error::UpstreamTimeout)
         }
     }
@@ -114,11 +133,14 @@ fn inject_headers(
     request_headers.remove("x-real-ip");
     request_headers.remove(hyper::header::SERVER);
 
+    request_headers.remove(hyper::header::CONNECTION);
+    request_headers.remove(HeaderName::from_static("keep-alive"));
     request_headers.remove("Proxy-Authenticate");
     request_headers.remove("Proxy-Authorization");
     request_headers.remove("Te");
     request_headers.remove("Trailers");
     request_headers.remove("Transfer-Encoding");
+    request_headers.remove(hyper::header::UPGRADE);
 
     request_headers.insert(
         HeaderName::from_static("x-forwarded-for"),
@@ -128,26 +150,10 @@ fn inject_headers(
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static("https"),
     );
-    request_headers.insert(
-        hyper::header::HOST,
-        HeaderValue::from_str(upstream_host)?,
-    );
+    request_headers.insert(hyper::header::HOST, HeaderValue::from_str(upstream_host)?);
     request_headers.insert(
         HeaderName::from_static("x-forwarded-host"),
         HeaderValue::from_str(original_host)?,
-    );
-    request_headers.insert(hyper::header::SERVER, HeaderValue::from_static("Torii"));
-    request_headers.insert(
-        hyper::header::STRICT_TRANSPORT_SECURITY,
-        HeaderValue::from_static("max-age=31536000; includeSubDomains"),
-    );
-    request_headers.insert(
-        hyper::header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    request_headers.insert(
-        hyper::header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("SAMEORIGIN"),
     );
     Ok(())
 }

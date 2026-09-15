@@ -145,12 +145,14 @@ impl AppState {
                 .await;
         }
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
+        let mut http = HttpConnector::new();
+        http.set_nodelay(true);
+        http.set_keepalive(Some(Duration::from_secs(60)));
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()?
             .https_or_http()
             .enable_http1()
-            .enable_http2()
-            .build();
+            .wrap_connector(http.clone());
         let tls_no_verify = NoCertificateVerification {};
         let insecure_tls_config = ClientConfig::builder()
             .dangerous()
@@ -160,15 +162,14 @@ impl AppState {
             .with_tls_config(insecure_tls_config)
             .https_or_http()
             .enable_http1()
-            .enable_http2()
-            .build();
+            .wrap_connector(http);
         let connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(50)
+            .pool_max_idle_per_host(500)
             .build(connector);
         let insecure_connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(50)
+            .pool_max_idle_per_host(500)
             .build(insecure_connector);
         Ok(Self {
             config,

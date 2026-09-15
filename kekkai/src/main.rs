@@ -86,7 +86,6 @@ fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
             let source_addr = u32::from_be_bytes(unsafe { (*ipv4hdr).src_addr });
             Ok(
                 if block_ipv4(source_addr) || block_ipv4_prefix(source_addr) {
-                    info!(&ctx, "XDP_DROP: {:i}", source_addr);
                     record_metric(1);
                     xdp_action::XDP_DROP
                 } else {
@@ -100,7 +99,6 @@ fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
             let source_addr = unsafe { (*ipv6hdr).src_addr };
             Ok(
                 if block_ipv6(&source_addr) || block_ipv6_prefix(&source_addr) {
-                    info!(&ctx, "XDP_DROP: {:i}", source_addr);
                     record_metric(1);
                     xdp_action::XDP_DROP
                 } else {

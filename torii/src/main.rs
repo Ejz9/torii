@@ -12,8 +12,11 @@ use axum::routing::any;
 use clap::Parser;
 use moka::sync::Cache;
 use rustls::ServerConfig;
+use rustls::crypto::aws_lc_rs::Ticketer;
+use rustls::server::ServerSessionMemoryCache;
 use rustls::sign::CertifiedKey;
 use tokio::fs::read_to_string;
+use tokio::net::TcpSocket;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -45,6 +48,7 @@ use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -160,23 +164,36 @@ async fn main() -> anyhow::Result<()> {
                 .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
                     &state.certificates,
                 ))));
+            config.ticketer = Ticketer::new()?;
+            config.session_storage = ServerSessionMemoryCache::new(20_000);
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
-            let listener = TcpListener::bind(&addr).await?;
+            let socket_addr: SocketAddr = addr.parse()?;
+            let nr_cpus = std::thread::available_parallelism()?;
+            let mut servers = Vec::new();
+            for _ in 0..nr_cpus.get() {
+                let socket = match socket_addr {
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                };
+                socket.set_reuseaddr(true)?;
+                socket.set_reuseport(true)?;
+                socket.bind(socket_addr)?;
+                let listener = socket.listen(10240)?;
+                servers.push(tokio::spawn(serve(
+                    listener,
+                    app.clone(),
+                    acceptor.clone(),
+                    l4_rate_limiter.clone(),
+                    hashira_tx.clone(),
+                    network_token.clone(),
+                )));
+            }
             info!("Listening on {}...", addr);
 
             // Add hashira use in the main server worker or for specialized / auth endpoints.
             // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
-            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii.
-
-            let server = tokio::spawn(serve(
-                listener,
-                app,
-                acceptor,
-                l4_rate_limiter,
-                hashira_tx,
-                network_token.clone(),
-            ));
+            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii
             select! {
                 _ = tokio::signal::ctrl_c() => {}
                 Some(result) = worker_set.join_next() => {
@@ -199,7 +216,9 @@ async fn main() -> anyhow::Result<()> {
             }
             info!("Shutdown signal recieved...");
             network_token.cancel();
-            let _ = server.await?;
+            for server in servers {
+                let _ = server.await?;
+            }
             info!("Network listener stopped");
             worker_token.cancel();
             while let Some(res) = worker_set.join_next().await {

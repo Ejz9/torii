@@ -506,7 +506,7 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
         .context("FATAL: Failed to find named program inside the compiled eBPF ELF file")?
         .try_into()?;
     program.load()?;
-    program.attach(iface, XdpMode::Skb)
+    program.attach(iface, XdpMode::Driver)
         .context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
 
     log::info!("Kekkai eBPF successfully attached to {}", iface);
