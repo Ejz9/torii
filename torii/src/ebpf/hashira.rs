@@ -37,20 +37,6 @@ pub enum EbpfEntry {
     DeleteIpv6Addr([u8; 16]),
 }
 
-struct LocalSidecarHandle {
-    id: u64,
-    mmap: MmapMut,
-    size: u32,
-    read_head: u32,
-}
-
-struct FutexWaitv {
-    val: u64,
-    uaddr: u64,
-    flags: u32,
-    __reserved: u32,
-}
-
 pub async fn run(
     // Change this and other workers to return a result -> Result<(), Error>
     size: u32,
@@ -61,31 +47,10 @@ pub async fn run(
     mut blocklist_v6: HashMap<MapData, [u8; 16], u8>,
     hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
+    mut event_rx: Receiver<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
-    let (shm_register_tx, mut shm_register_rx) =
-        tokio::sync::mpsc::channel::<LocalSidecarHandle>(64);
-    /*
-    let Ok(buffer_file) = std::fs::OpenOptions::new()
-        .mode(0o600)
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("/dev/shm/torii")
-    else {
-        error!("Failed to open ring buffer");
-        return; //either hard crash or error in a more obvious way ex: ToriiError in error.rs and .map_err on places I want to pass custom text and bubble up the actual error
-    };
-    if let Err(e) = buffer_file.set_len(8 + (288 * size as u64)) {
-        error!("Failed to create ring buffer: {e}");
-        return;
-    }
-    let Ok(mut mmap) = (unsafe { memmap2::MmapMut::map_mut(&buffer_file) }) else {
-        error!("Failed to map ring buffer");
-        return;
-    };
-    */
     child_workers.spawn({
         let cancel_token = cancel_token.clone();
         async move {
@@ -127,101 +92,21 @@ pub async fn run(
     child_workers.spawn({
         let cancel_token = cancel_token.clone();
         async move {
-            let mut sidecars: Vec<LocalSidecarHandle> = Vec::new();
-            let mut engine = PolicyEngine::new(hashira_tx, dynamic_config);
-            //let server_config = ServerConfig::with_crypto(Arc::new());
+            let engine = PolicyEngine::new(hashira_tx, dynamic_config);
             loop {
                 select! {
                     biased;
-                    _ = cancel_token.cancelled() => {
-                        info!("IPS exiting");
-                        break;
+                    _ = cancel_token.cancelled() => break,
+                    Some(event) = event_rx.recv() => {
+                        engine.evaluate_event(&event);
                     }
-
                 };
-
-                let mut events_processed = 0;
-                for sidecar in sidecars.iter_mut() {
-                    let (head_bytes, data_bytes) = sidecar.mmap.split_at(16);
-                    let buffer_head = unsafe { &*(head_bytes.as_ptr() as *const BufferHeader) };
-                    let write_head = buffer_head.write_head.value.load(Ordering::Acquire);
-                    if write_head > sidecar.read_head + sidecar.size {
-                        warn!("Sidecar {} lapped reader! Snapping head.", sidecar.id); //id or by domain?
-                        sidecar.read_head = write_head - sidecar.size;
-                    }
-                    let mut processed = 0;
-                    while sidecar.read_head < write_head && processed < EVENT_BUDGET {
-                        let index =
-                            ((sidecar.read_head & (sidecar.size - 1)) as usize) * EVENT_SIZE; // sidecar.size must be power of 2 for bitwise AND
-                        let chunk = &data_bytes[index..index + EVENT_SIZE];
-                        if let Ok(event) = ConnectionEvent::ref_from_bytes(chunk) {
-                            // need to add validation of the bytes here or in the checks
-                            engine.evaluate_event(event);
-                        } else {
-                            error!("Corrupted event at SHM index {index}");
-                        }
-                        sidecar.read_head += 1;
-                        processed += 1;
-                    }
-                    if processed > 0 {
-                        buffer_head
-                            .read_head
-                            .value
-                            .store(sidecar.read_head, Ordering::Release);
-                        events_processed += processed;
-                    }
-                }
-                if events_processed == 0 {
-                    let mut waiters: Vec<FutexWaitv> = Vec::with_capacity(sidecars.len());
-                    for sidecar in sidecars.iter() {
-                        let (head_bytes, data_bytes) = sidecar.mmap.split_at(16);
-                        let buffer_head = unsafe { &*(head_bytes.as_ptr() as *const BufferHeader) };
-                        let write_head =
-                            buffer_head.write_head.value.load(Ordering::Relaxed) as u64;
-                        let write_head_ptr = &buffer_head.write_head.value as *const _ as u64;
-                        waiters.push(FutexWaitv {
-                            val: write_head,
-                            uaddr: write_head_ptr,
-                            flags: 2,
-                            __reserved: 0,
-                        })
-                    }
-
-                    let timeout = libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 100_000_000,
-                    };
-
-                    unsafe {
-                        libc::syscall(
-                            libc::SYS_futex_waitv,
-                            waiters.as_ptr(),
-                            waiters.len() as u32,
-                            0,
-                            &timeout as *const libc::timespec,
-                            libc::CLOCK_MONOTONIC,
-                        );
-                    }
-                }
             }
             Ok(())
         }
     });
     cancel_token.cancelled().await;
     Ok(())
-    /*
-    if remote_sidecars {
-        let socket = UdpSocket::bind(addr);
-        info!("UDP Sidecar listner active on: {addr}");
-        tokio::spawn(async move {
-            loop {
-                //match socket.recv_from()
-                //need to safely handle exposing UDP or use a tunnel (VPN)
-                //Need to resize the socket (socket2 crate) so can handle multiple events at once and in large scale.
-            }
-        });
-    }
-    */
 }
 
 type IpLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
@@ -315,17 +200,20 @@ impl PolicyEngine {
         Duration::from_secs(escalation)
     }
 
-    fn evaluate_event(&mut self, event: &ConnectionEvent) {
+    fn evaluate_event(&self, event: &ConnectionEvent) {
+        if event.ip_addr().is_loopback() {
+            return;
+        }
         let security_config = &self.dynamic_config.load().security;
         let mut strikes: u32 = 0;
 
         let request_count = self.velocity_tracker.get_with(event.ip_addr(), || 0) + 1;
         self.velocity_tracker.insert(event.ip_addr(), request_count);
-        if request_count > 150 {
+        if request_count > security_config.ebpf_velocity_threshhold as u32 {
             strikes += security_config.ebpf_strike_threshold as u32;
         }
 
-        strikes += check_latency(event.latency_ms);
+        strikes += check_latency(event.status_code, event.latency_ms);
         strikes += check_status(event.status_code);
         strikes += check_method(&event.method[..event.method_len as usize]);
         if security_config
@@ -358,7 +246,8 @@ impl PolicyEngine {
                                 error!(
                                     "CRITICAL: Failed to send ban to kekkai for {}: {}",
                                     ip_u32, e
-                                )
+                                );
+                                return;
                             }
                         }
                     }
@@ -373,11 +262,17 @@ impl PolicyEngine {
                                 error!(
                                     "CRITICAL: Failed to send ban to kekkai for {:?}: {}",
                                     event.ip, e
-                                )
+                                );
+                                return;
                             }
                         }
                     }
                 }
+                info!(
+                    "eBPF Ban triggered for {:?} for {:?}",
+                    event.ip_addr(),
+                    escalated_duration
+                )
             }
         }
     }
@@ -403,13 +298,16 @@ const PENALTY_MODERATE: u32 = 2;
 const PENALTY_MINOR: u32 = 1;
 
 #[inline]
-fn check_latency(latency: u32) -> u32 {
-    if latency > 15_000 { PENALTY_SEVERE } else { 0 }
+fn check_latency(status_code: u16, latency: u32) -> u32 {
+    match status_code {
+        408 | 504 if latency > 15_000 => PENALTY_SEVERE,
+        _ => 0,
+    }
 }
 #[inline]
 fn check_status(status_code: u16) -> u32 {
     match status_code {
-        401 | 403 => PENALTY_MODERATE,
+        400 | 401 | 403 => PENALTY_MODERATE,
         404 | 405 | 500 | 502 | 503 => PENALTY_MINOR,
         _ => 0,
     }
@@ -420,7 +318,7 @@ fn check_method(method: &[u8]) -> u32 {
         return PENALTY_INSTANT;
     }
     match method {
-        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" => 0,
+        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" | b"TLS" => 0,
         _ => PENALTY_INSTANT,
     }
 }

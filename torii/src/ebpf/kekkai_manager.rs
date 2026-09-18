@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use keidai::ConnectionEvent;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -333,6 +334,7 @@ pub async fn run(
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
+    event_rx: tokio::sync::mpsc::Receiver<ConnectionEvent>,
     interface: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -421,6 +423,7 @@ pub async fn run(
         blocklist_v6,
         hashira_tx,
         hashira_rx,
+        event_rx,
         cancel_token.clone(),
     ));
     child_workers.spawn(ofuda::run(

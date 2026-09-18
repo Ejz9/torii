@@ -8,7 +8,7 @@ use axum::{
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::debug;
 
 pub async fn handle_any(
     State(state): State<Arc<AppState>>,
@@ -50,7 +50,7 @@ pub async fn handle_any(
     let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.uri = new_uri.parse()?;
     parts.version = hyper::Version::HTTP_11;
-    inject_headers(
+    let _ = inject_headers(
         &mut parts.headers,
         source_ip,
         &matched_route.route.upstream_host_header,

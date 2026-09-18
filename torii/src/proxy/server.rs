@@ -1,6 +1,7 @@
 use arc_swap::ArcSwap;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
+use keidai::ConnectionEvent;
 use moka::sync::Cache;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
@@ -12,8 +13,6 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, error, info};
-
-use crate::ebpf::hashira::EbpfEntry;
 
 #[derive(Debug)]
 pub struct CertificateResolver {
@@ -50,8 +49,7 @@ pub async fn serve(
     listener: TcpListener,
     routes: Router,
     acceptor: TlsAcceptor,
-    l4_rate_limiter: Cache<IpAddr, u32>,
-    hashira_tx: Sender<EbpfEntry>,
+    event_tx: Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(256));
@@ -73,6 +71,7 @@ pub async fn serve(
         let tls_acceptor = acceptor.clone();
         let app = routes.clone();
         let limiter = Arc::clone(&handshake_limiter);
+        let tx = event_tx.clone();
 
         tokio::spawn(async move {
             let Ok(permit) = limiter.acquire_owned().await else {
@@ -86,6 +85,7 @@ pub async fn serve(
                 Err(e) => {
                     drop(permit);
                     debug!("TLS Handshake failed: {}", e);
+                    let _ = tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
                     return;
                 }
             };

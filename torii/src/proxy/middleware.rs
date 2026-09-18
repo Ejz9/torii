@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -5,12 +6,14 @@ use crate::auth::oidc::TokenResponse;
 use crate::auth::oidc::{ActiveSession, validate_token};
 use crate::error::Error::{self, Http};
 use crate::state::AppState;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Redirect};
+use axum::response::{IntoResponse, Redirect, Response};
+use keidai::ConnectionEvent;
+use tokio::time::Instant;
 use url::form_urlencoded;
 
 fn inject_headers(request_headers: &mut HeaderMap, session: &ActiveSession) -> Result<(), Error> {
@@ -179,4 +182,26 @@ pub async fn enforce_auth(
     }
     // CHECK FOR TORII SESSION COOKIE
     return Ok(next.run(req).await.into_response());
+}
+
+pub async fn temizuya(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start = Instant::now();
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let response = next.run(req).await;
+    let latency_ms = start.elapsed().as_millis() as u32;
+    let status_code = response.status().as_u16();
+    let _ = state.event_tx.try_send(ConnectionEvent::new(
+        latency_ms,
+        status_code,
+        &path,
+        addr.ip(),
+        &method,
+    ));
+    response
 }

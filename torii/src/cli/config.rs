@@ -213,6 +213,8 @@ pub struct SecurityConfig {
     forbidden_paths: Vec<String>,
     #[serde(default = "ebpf_strike_threshold")]
     pub ebpf_strike_threshold: u64,
+    #[serde(default = "ebpf_velocity_threshhold")]
+    pub ebpf_velocity_threshhold: u64,
     #[serde(default = "ebpf_lockout_duration_secs")]
     pub ebpf_lockout_duration_secs: u64,
     #[serde(skip, default = "default_path_matcher")]
@@ -225,6 +227,7 @@ impl Default for SecurityConfig {
             default_certificate_mode_wildcard: false,
             forbidden_paths: vec![],
             ebpf_strike_threshold: 10,
+            ebpf_velocity_threshhold: 150,
             ebpf_lockout_duration_secs: 3600,
             path_matcher: default_path_matcher(),
         }
@@ -239,6 +242,9 @@ fn forbidden_paths() -> Vec<String> {
 }
 fn ebpf_strike_threshold() -> u64 {
     10
+}
+fn ebpf_velocity_threshhold() -> u64 {
+    150
 }
 fn ebpf_lockout_duration_secs() -> u64 {
     3600

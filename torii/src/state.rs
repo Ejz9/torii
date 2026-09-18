@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use keidai::ConnectionEvent;
 use tokio::fs::read_to_string;
 
 use crate::auth::oidc::{ActiveSession, Endpoints};
@@ -37,6 +38,7 @@ pub struct AppState {
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
+    pub event_tx: mpsc::Sender<ConnectionEvent>
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -49,6 +51,8 @@ default_certificate_mode_wildcard = true
 forbidden_paths: ["../", "%2e%2e", "/.env", "/cgi-bin/", "${"]
 # The number of malicious requests before the kernel drops the IP at the NIC
 ebpf_strike_threshold = 10
+# The number of request allowed in one second before striking an IP
+ebpf_velocity_threshhold = 150
 # How long (in seconds) the offending IP remains locked out
 ebpf_lockout_duration_secs = 300
 
@@ -73,6 +77,7 @@ impl AppState {
                 HashMap<String, Arc<CertifiedKey>>,
             )>,
         >,
+        event_tx: mpsc::Sender<ConnectionEvent>
     ) -> Result<Self, Error> {
         let endpoints = if let Some(oidc_provider) = &config.oidc_provider {
             Some(Endpoints::discover_endpoints(&oidc_provider.oidc_issuer_url).await?)
@@ -183,6 +188,7 @@ impl AppState {
             insecure_connection_pool,
             cert_verifier,
             certificates,
+            event_tx
         })
     }
 }
