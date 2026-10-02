@@ -99,9 +99,15 @@ async fn main() -> anyhow::Result<()> {
             let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(10_000);
             let (event_tx, event_rx) = flume::bounded::<ConnectionEvent>(10_000);
             let state = Arc::new(
-                AppState::new(config, cli.config, acme_tx.clone())
-                    .await
-                    .context("FATAL: Daemon failed to build state")?,
+                AppState::new(
+                    config,
+                    cli.config,
+                    acme_tx.clone(),
+                    event_tx.clone(),
+                    root_keypair,
+                )
+                .await
+                .context("FATAL: Daemon failed to build state")?,
             );
             let Some(interface) = state.config.interface.clone() else {
                 error!("Interface not defined in .env");
@@ -113,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 mihari_notify.clone(),
                 hashira_tx.clone(),
                 hashira_rx,
+                event_rx,
                 interface,
                 worker_token.clone(),
             ));
@@ -169,27 +176,41 @@ async fn main() -> anyhow::Result<()> {
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
             let socket_addr: SocketAddr = addr.parse()?;
-            let nr_cpus = std::thread::available_parallelism()?;
+            let nr_cpus = std::thread::available_parallelism()?.get();
             let mut servers = Vec::new();
-            for _ in 0..nr_cpus.get() {
+            for _ in 0..nr_cpus {
+                let socket_addr = socket_addr;
+                let app = app.clone();
+                let acceptor = acceptor.clone();
+                let event_tx = event_tx.clone();
+                let network_token = network_token.clone();
                 let socket = match socket_addr {
                     SocketAddr::V4(_) => TcpSocket::new_v4()?,
                     SocketAddr::V6(_) => TcpSocket::new_v6()?,
                 };
                 socket.set_reuseaddr(true)?;
                 socket.set_reuseport(true)?;
+                let timeout_secs: libc::c_int = 5;
+                unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_TCP,
+                        libc::TCP_DEFER_ACCEPT,
+                        &timeout_secs as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&timeout_secs) as libc::socklen_t,
+                    );
+                }
                 socket.bind(socket_addr)?;
                 let listener = socket.listen(10240)?;
                 servers.push(tokio::spawn(serve(
                     listener,
                     app.clone(),
                     acceptor.clone(),
-                    l4_rate_limiter.clone(),
-                    hashira_tx.clone(),
+                    event_tx.clone(),
                     network_token.clone(),
                 )));
             }
-            info!("Listening on {}...", addr);
+            info!("Listening on {} across {} listeners...", addr, nr_cpus);
 
             // Add hashira use in the main server worker or for specialized / auth endpoints.
             // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
@@ -217,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
             info!("Shutdown signal recieved...");
             network_token.cancel();
             for server in servers {
-                let _ = server.await?;
+                let _ = server.await;
             }
             info!("Network listener stopped");
             worker_token.cancel();

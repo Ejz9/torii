@@ -82,10 +82,10 @@ pub async fn run(
                 select! {
                     biased;
                     _ = cancel_token.cancelled() => break,
-                    Some(event) = event_rx.recv() => {
+                    Ok(event) = event_rx.recv_async() => {
                         engine.evaluate_event(&event);
                     }
-                };
+                }
             }
             Ok(())
         }

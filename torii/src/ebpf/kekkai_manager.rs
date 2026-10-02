@@ -334,7 +334,7 @@ pub async fn run(
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
-    event_rx: tokio::sync::mpsc::Receiver<ConnectionEvent>,
+    event_rx: flume::Receiver<ConnectionEvent>,
     interface: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {

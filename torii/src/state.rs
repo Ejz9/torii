@@ -38,7 +38,8 @@ pub struct AppState {
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
-    pub event_tx: mpsc::Sender<ConnectionEvent>
+    pub event_tx: flume::Sender<ConnectionEvent>,
+    pub root_keypair: biscuit_auth::KeyPair,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -77,7 +78,8 @@ impl AppState {
                 HashMap<String, Arc<CertifiedKey>>,
             )>,
         >,
-        event_tx: mpsc::Sender<ConnectionEvent>
+        event_tx: flume::Sender<ConnectionEvent>,
+        root_keypair: biscuit_auth::KeyPair,
     ) -> Result<Self, Error> {
         let endpoints = if let Some(oidc_provider) = &config.oidc_provider {
             Some(Endpoints::discover_endpoints(&oidc_provider.oidc_issuer_url).await?)
@@ -167,11 +169,11 @@ impl AppState {
             .wrap_connector(http);
         let connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(500)
+            .pool_max_idle_per_host(usize::MAX)
             .build(connector);
         let insecure_connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(500)
+            .pool_max_idle_per_host(usize::MAX)
             .build(insecure_connector);
         Ok(Self {
             config,
@@ -185,7 +187,8 @@ impl AppState {
             insecure_connection_pool,
             cert_verifier,
             certificates,
-            event_tx
+            event_tx,
+            root_keypair,
         })
     }
 }

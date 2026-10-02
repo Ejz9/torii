@@ -50,7 +50,7 @@ pub async fn serve(
     listener: TcpListener,
     routes: Router,
     acceptor: TlsAcceptor,
-    event_tx: Sender<ConnectionEvent>,
+    event_tx: flume::Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(64));
