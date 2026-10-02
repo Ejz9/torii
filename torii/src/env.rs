@@ -22,9 +22,9 @@ pub struct Config {
     pub mihari_interval: u64,
     pub mihari_provider: Option<MihariProviderKind>,
     pub kekkai_path: String,
-    pub hashira_shm_capacity: u32,
     pub ebpf_metrics: bool,
     pub sando_path: String,
+    pub biscuit_path: String,
 }
 
 impl Config {
@@ -108,9 +108,7 @@ impl Config {
         if let Err(e) = std::fs::create_dir_all(&sando_path) {
             return Err(Error::Env(format!("Failed to create DATA_PATH: {e}")));
         }
-        let hashira_shm_capacity = var("HASHIRA_SHM_CAPACITY")
-            .unwrap_or_else(|_| "100000".to_string())
-            .parse::<u32>()?;
+        let biscuit_path = format!("{data_path}biscuit_root");
         let ebpf_metrics = var("EBPF_METRICS")
             .map(|v| v.parse::<bool>().unwrap_or(true))
             .unwrap_or(false);
@@ -129,9 +127,9 @@ impl Config {
             mihari_interval,
             mihari_provider,
             kekkai_path,
-            hashira_shm_capacity,
             ebpf_metrics,
             sando_path,
+            biscuit_path,
         })
     }
 }

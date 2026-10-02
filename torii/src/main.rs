@@ -45,6 +45,7 @@ use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
 use crate::ebpf::ofuda::OfudaEntry;
 use crate::env::Config;
+use crate::proxy::middleware::temizuya;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
@@ -75,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
+            let root_keypair = generate_or_load_keypair(&config.biscuit_path)
+                .context("FATAL: Failed to initialize Biscuit root key")?;
             info!("Environment loaded successfully!");
             let root_token = CancellationToken::new();
             let worker_token = root_token.child_token();
@@ -154,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
             }
             let addr = format!("{}:{}", state.config.host, state.config.port);
             let private_routes = Router::new()
-                .route("/api/tunnel-key", any(exchange_tunnel_key))
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
@@ -165,7 +167,9 @@ async fn main() -> anyhow::Result<()> {
                     .route("/auth/callback", any(auth_callback));
                 app = app.merge(auth_routes)
             };
-            let app = app.with_state(state.clone());
+            let app = app
+                .layer(middleware::from_fn_with_state(state.clone(), temizuya))
+                .with_state(state.clone());
             let mut config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
