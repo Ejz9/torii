@@ -10,7 +10,7 @@ mod tunnel;
 use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
-use moka::sync::Cache;
+use keidai::ConnectionEvent;
 use rustls::ServerConfig;
 use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::server::ServerSessionMemoryCache;
@@ -29,7 +29,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::acme::ddns;
 use crate::acme::dns;
-use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
+use crate::auth::biscuit::generate_or_load_keypair;
+use crate::auth::oidc::{auth_callback, fetch_jwks};
 use crate::cli::cli::{Cli, Commands};
 use crate::cli::config::ToriiConfig;
 use crate::cli::socket;
@@ -47,11 +48,9 @@ use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -32,7 +32,7 @@ impl Config {
         let interface = var("INTERFACE").ok();
         let port = var("PORT").unwrap_or_else(|_| "443".to_string()).parse()?;
         let quic_event_port = var("QUIC_EVENT_PORT")
-            .unwrap_or_else(|_| "10_000".to_string())
+            .unwrap_or_else(|_| "10000".to_string())
             .parse()?;
         let host = var("HOST")
             .unwrap_or_else(|_| "0.0.0.0".to_string())

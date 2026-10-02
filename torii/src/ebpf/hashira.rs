@@ -1,9 +1,4 @@
-use std::{
-    net::IpAddr,
-    num::NonZeroU32,
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::{net::IpAddr, num::NonZeroU32, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use aya::maps::{HashMap, MapData};
@@ -12,23 +7,17 @@ use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
-use keidai::{BufferHeader, ConnectionEvent};
-use memmap2::MmapMut;
+use keidai::ConnectionEvent;
 use moka::{Expiry, sync::Cache};
-use quinn::ServerConfig;
 use tokio::{
     select,
     sync::mpsc::{self, Receiver, Sender},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
-use zerocopy::FromBytes;
+use tracing::{error, info};
 
 use crate::cli::config::ActiveState;
-
-const EVENT_BUDGET: u32 = 256;
-const EVENT_SIZE: usize = 288;
 
 pub enum EbpfEntry {
     InsertIpv4(u32),

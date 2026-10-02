@@ -1,10 +1,10 @@
+use keidai::ConnectionEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use keidai::ConnectionEvent;
 use tokio::fs::read_to_string;
 
-use crate::auth::oidc::{ActiveSession, Endpoints};
+use crate::auth::oidc::Endpoints;
 use crate::cli::config::ActiveState;
 use crate::env::Config;
 use crate::error::Error;

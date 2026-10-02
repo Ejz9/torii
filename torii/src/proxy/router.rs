@@ -1,4 +1,4 @@
-use crate::{error::Error, state::AppState};
+use crate::{cli::config::RouteMatch, error::Error, state::AppState};
 use axum::{
     body::Body,
     extract::{ConnectInfo, State},
@@ -7,7 +7,7 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::sync::Arc;
+use std::{io::Write, net::IpAddr, sync::Arc};
 use tracing::debug;
 
 pub async fn handle_any(

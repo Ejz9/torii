@@ -1,15 +1,11 @@
-use std::{
-    hash::RandomState,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use crate::error::Error;
 use crate::state::AppState;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};

@@ -2,17 +2,18 @@ use arc_swap::ArcSwap;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use keidai::ConnectionEvent;
-use moka::sync::Cache;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::mpsc::Sender};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    net::TcpListener,
+};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 #[derive(Debug)]
 pub struct CertificateResolver {

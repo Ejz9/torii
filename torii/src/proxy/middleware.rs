@@ -1,9 +1,3 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::auth::oidc::TokenResponse;
-use crate::auth::oidc::{ActiveSession, validate_token};
 use crate::error::Error::{self, Http};
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Request, State};

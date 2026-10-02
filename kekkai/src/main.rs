@@ -12,12 +12,9 @@ use aya_ebpf::{
     },
     programs::XdpContext,
 };
-use aya_log_ebpf::info;
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
-    tcp::TcpHdr,
-    udp::UdpHdr,
+    ip::{Ipv4Hdr, Ipv6Hdr},
 };
 
 #[map]
