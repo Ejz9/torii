@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["torii", "kekkai", "tegata", "kakehashi", "keidai"]
-default-members = ["torii", "tegata", "kakehashi", "keidai"]
+members = ["torii", "kekkai", "tegata", "shinshi", "keidai"]
+default-members = ["torii", "tegata", "shinshi", "keidai"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,22 +17,16 @@ aya-log-ebpf = { version = "0.2.0", default-features = false }
 
 anyhow = { version = "1", default-features = false }
 cargo_metadata = { version = "0.23.0", default-features = false }
-# `std` feature is currently required to build `clap`.
-#
-# See https://github.com/clap-rs/clap/blob/61f5ee5/clap_builder/src/lib.rs#L15.
-clap = { version = "4.5.20", default-features = false, features = ["std"] }
 env_logger = { version = "0.11.5", default-features = false }
 libc = { version = "0.2.159", default-features = false }
 log = { version = "0.4.22", default-features = false }
-tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 keidai = { path = "keidai" }
 zerocopy = { version = "0.8.55", features = ["derive"] }
-
-[profile.release.package.kekkai]
-debug = 2
-codegen-units = 1
-strip = false
+quinn = { version = "0.11.11", default-features = false, features = [
+    "aws-lc-rs",
+    "rustls-aws-lc-rs",
+] }
 
 [profile.release]
 lto = true

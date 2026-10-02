@@ -6,13 +6,21 @@ mod env;
 mod error;
 mod proxy;
 mod state;
+mod tunnel;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
-use moka::sync::Cache;
+use keidai::ConnectionEvent;
 use rustls::ServerConfig;
+use rustls::crypto::aws_lc_rs::Ticketer;
+use rustls::server::ServerSessionMemoryCache;
 use rustls::sign::CertifiedKey;
 use tokio::fs::read_to_string;
+use tokio::net::TcpSocket;
 use tokio::select;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -25,7 +33,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use crate::acme::ddns;
 use crate::acme::dns;
-use crate::auth::oidc::{auth_callback, exchange_tunnel_key, fetch_jwks};
+use crate::auth::biscuit::generate_or_load_keypair;
+use crate::auth::oidc::{auth_callback, fetch_jwks};
 use crate::cli::cli::{Cli, Commands};
 use crate::cli::config::ToriiConfig;
 use crate::cli::socket;
@@ -36,6 +45,7 @@ use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
 use crate::ebpf::ofuda::OfudaEntry;
 use crate::env::Config;
+use crate::proxy::middleware::temizuya;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
@@ -43,10 +53,9 @@ use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -67,18 +76,20 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
+            let root_keypair = generate_or_load_keypair(&config.biscuit_path)
+                .context("FATAL: Failed to initialize Biscuit root key")?;
             info!("Environment loaded successfully!");
             let root_token = CancellationToken::new();
             let worker_token = root_token.child_token();
             let network_token = root_token.child_token();
             let mut worker_set: JoinSet<anyhow::Result<()>> = JoinSet::new();
-            let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
+            let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(32);
             let (acme_tx, acme_rx) = if config.acme_provider.is_some() {
                 let (tx, rx) = mpsc::channel::<(
                     HashSet<String>,
                     HashSet<String>,
                     HashMap<String, Arc<CertifiedKey>>,
-                )>(20);
+                )>(32);
                 (Some(tx), Some(rx))
             } else {
                 (None, None)
@@ -88,15 +99,18 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
-            let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
-                .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(1))
-                .build();
+            let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(10_000);
+            let (event_tx, event_rx) = flume::bounded::<ConnectionEvent>(10_000);
             let state = Arc::new(
-                AppState::new(config, cli.config, acme_tx.clone())
-                    .await
-                    .context("FATAL: Daemon failed to build state")?,
+                AppState::new(
+                    config,
+                    cli.config,
+                    acme_tx.clone(),
+                    event_tx.clone(),
+                    root_keypair,
+                )
+                .await
+                .context("FATAL: Daemon failed to build state")?,
             );
             let Some(interface) = state.config.interface.clone() else {
                 error!("Interface not defined in .env");
@@ -108,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 mihari_notify.clone(),
                 hashira_tx.clone(),
                 hashira_rx,
+                event_rx,
                 interface,
                 worker_token.clone(),
             ));
@@ -142,7 +157,6 @@ async fn main() -> anyhow::Result<()> {
             }
             let addr = format!("{}:{}", state.config.host, state.config.port);
             let private_routes = Router::new()
-                .route("/api/tunnel-key", any(exchange_tunnel_key))
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
@@ -153,29 +167,58 @@ async fn main() -> anyhow::Result<()> {
                     .route("/auth/callback", any(auth_callback));
                 app = app.merge(auth_routes)
             };
-            let app = app.with_state(state.clone());
+            let app = app
+                .layer(middleware::from_fn_with_state(state.clone(), temizuya))
+                .with_state(state.clone());
             let mut config = ServerConfig::builder()
                 .with_no_client_auth()
                 .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
                     &state.certificates,
                 ))));
+            config.ticketer = Ticketer::new()?;
+            config.session_storage = ServerSessionMemoryCache::new(20_000);
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
-            let listener = TcpListener::bind(&addr).await?;
-            info!("Listening on {}...", addr);
+            let socket_addr: SocketAddr = addr.parse()?;
+            let nr_cpus = std::thread::available_parallelism()?.get();
+            let mut servers = Vec::new();
+            for _ in 0..nr_cpus {
+                let socket_addr = socket_addr;
+                let app = app.clone();
+                let acceptor = acceptor.clone();
+                let event_tx = event_tx.clone();
+                let network_token = network_token.clone();
+                let socket = match socket_addr {
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                };
+                socket.set_reuseaddr(true)?;
+                socket.set_reuseport(true)?;
+                let timeout_secs: libc::c_int = 5;
+                unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_TCP,
+                        libc::TCP_DEFER_ACCEPT,
+                        &timeout_secs as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&timeout_secs) as libc::socklen_t,
+                    );
+                }
+                socket.bind(socket_addr)?;
+                let listener = socket.listen(10240)?;
+                servers.push(tokio::spawn(serve(
+                    listener,
+                    app.clone(),
+                    acceptor.clone(),
+                    event_tx.clone(),
+                    network_token.clone(),
+                )));
+            }
+            info!("Listening on {} across {} listeners...", addr, nr_cpus);
 
             // Add hashira use in the main server worker or for specialized / auth endpoints.
             // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
-            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii.
-
-            let server = tokio::spawn(serve(
-                listener,
-                app,
-                acceptor,
-                l4_rate_limiter,
-                hashira_tx,
-                network_token.clone(),
-            ));
+            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii
             select! {
                 _ = tokio::signal::ctrl_c() => {}
                 Some(result) = worker_set.join_next() => {
@@ -198,7 +241,9 @@ async fn main() -> anyhow::Result<()> {
             }
             info!("Shutdown signal recieved...");
             network_token.cancel();
-            let _ = server.await?;
+            for server in servers {
+                let _ = server.await;
+            }
             info!("Network listener stopped");
             worker_token.cancel();
             while let Some(res) = worker_set.join_next().await {

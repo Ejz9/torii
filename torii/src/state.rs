@@ -1,9 +1,10 @@
+use keidai::ConnectionEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::read_to_string;
 
-use crate::auth::oidc::{ActiveSession, Endpoints};
+use crate::auth::oidc::Endpoints;
 use crate::cli::config::ActiveState;
 use crate::env::Config;
 use crate::error::Error;
@@ -29,7 +30,6 @@ pub struct AppState {
     pub config: Config,
     pub endpoints: Option<Endpoints>,
     pub csrf_cache: Cache<String, String>,
-    pub session_cache: Cache<String, ActiveSession>,
     pub jwks_cache: Cache<String, DecodingKey>,
     pub limiter_cache: Cache<String, ()>,
     pub dynamic_config: Arc<ArcSwap<ActiveState>>,
@@ -37,6 +37,8 @@ pub struct AppState {
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
+    pub event_tx: flume::Sender<ConnectionEvent>,
+    pub root_keypair: biscuit_auth::KeyPair,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -49,6 +51,8 @@ default_certificate_mode_wildcard = true
 forbidden_paths: ["../", "%2e%2e", "/.env", "/cgi-bin/", "${"]
 # The number of malicious requests before the kernel drops the IP at the NIC
 ebpf_strike_threshold = 10
+# The number of request allowed in one second before striking an IP
+ebpf_velocity_threshhold = 150
 # How long (in seconds) the offending IP remains locked out
 ebpf_lockout_duration_secs = 300
 
@@ -73,6 +77,8 @@ impl AppState {
                 HashMap<String, Arc<CertifiedKey>>,
             )>,
         >,
+        event_tx: flume::Sender<ConnectionEvent>,
+        root_keypair: biscuit_auth::KeyPair,
     ) -> Result<Self, Error> {
         let endpoints = if let Some(oidc_provider) = &config.oidc_provider {
             Some(Endpoints::discover_endpoints(&oidc_provider.oidc_issuer_url).await?)
@@ -89,16 +95,12 @@ impl AppState {
         }
         info!("Preparing resources...");
         let csrf_cache: Cache<String, String> = Cache::builder()
-            .max_capacity(10_000)
+            .max_capacity(1000)
             .time_to_live(Duration::from_secs(300))
-            .build();
-        let session_cache: Cache<String, ActiveSession> = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_hours(168))
             .build();
         let jwks_cache: Cache<String, DecodingKey> = Cache::new(20);
         let limiter_cache: Cache<String, ()> = Cache::builder()
-            .max_capacity(10_000)
+            .max_capacity(10)
             .time_to_live(Duration::from_secs(15))
             .build();
         let configuration_file = read_to_string(config_path).await?;
@@ -120,10 +122,9 @@ impl AppState {
                         "Failed to parse custom root DER bytes".to_string(),
                     ));
                 };
-                let not_after = cert.tbs_certificate.validity.not_after;
-                if (not_after.timestamp() as u64)
-                    < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-                    || (not_after.timestamp() as u64)
+                let not_after = cert.tbs_certificate.validity.not_after.timestamp() as u64;
+                if not_after < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+                    || not_after
                         < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                             + Duration::from_hours(24 * 30).as_secs()
                 {
@@ -146,12 +147,15 @@ impl AppState {
                 .await;
         }
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
+        let mut http = HttpConnector::new();
+        http.set_nodelay(true);
+        http.set_keepalive(Some(Duration::from_secs(60)));
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()?
+            .with_native_roots()
+            .expect("valid native roots")
             .https_or_http()
             .enable_http1()
-            .enable_http2()
-            .build();
+            .wrap_connector(http.clone());
         let tls_no_verify = NoCertificateVerification {};
         let insecure_tls_config = ClientConfig::builder()
             .dangerous()
@@ -161,21 +165,19 @@ impl AppState {
             .with_tls_config(insecure_tls_config)
             .https_or_http()
             .enable_http1()
-            .enable_http2()
-            .build();
+            .wrap_connector(http);
         let connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(50)
+            .pool_max_idle_per_host(usize::MAX)
             .build(connector);
         let insecure_connection_pool = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(50)
+            .pool_max_idle_per_host(usize::MAX)
             .build(insecure_connector);
         Ok(Self {
             config,
             endpoints,
             csrf_cache,
-            session_cache,
             jwks_cache,
             limiter_cache,
             dynamic_config,
@@ -183,6 +185,8 @@ impl AppState {
             insecure_connection_pool,
             cert_verifier,
             certificates,
+            event_tx,
+            root_keypair,
         })
     }
 }

@@ -36,10 +36,12 @@ pub enum Error {
     RouteNotFound(#[from] matchit::MatchError),
     #[error(transparent)]
     InvalidUri(#[from] axum::http::uri::InvalidUri),
+    #[error(transparent)]
+    InvalidUriParts(#[from] axum::http::uri::InvalidUriParts),
     #[error("Invalid internet domain. Should contain at minimum base.tld")]
     InvalidDomain,
     #[error(transparent)]
-    InvalidPem(#[from] x509_parser::error::PEMError),
+    InvalidPem(#[from] x509_parser::nom::Err<x509_parser::error::PEMError>),
     #[error(transparent)]
     InvalidX509(#[from] x509_parser::error::X509Error),
     #[error(transparent)]
@@ -69,6 +71,14 @@ pub enum Error {
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("HTTP Error {0}: {1}")]
     Http(StatusCode, &'static str),
+    #[error(transparent)]
+    FromUtf8(#[from] std::string::FromUtf8Error),
+    #[error(transparent)]
+    Rcgen(#[from] rcgen::Error),
+    #[error(transparent)]
+    TokenFormat(#[from] biscuit_auth::error::Format),
+    #[error(transparent)]
+    InvalidToken(#[from] biscuit_auth::error::Token),
 }
 
 impl IntoResponse for Error {
@@ -109,52 +119,10 @@ impl IntoResponse for Error {
             Error::RouteNotFound(_) => {
                 (StatusCode::NOT_FOUND, "Requested URL not found").into_response()
             }
-            Error::InvalidUri(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid URL").into_response()
+            err => {
+                tracing::error!("Internal error: {err}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
             }
-            Error::InvalidDomain => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid domain").into_response()
-            }
-            Error::InvalidPem(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid PEM").into_response()
-            }
-            Error::InvalidX509(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Invalid X.509 certificate",
-            )
-                .into_response(),
-            Error::Acme(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Acme error").into_response(),
-            Error::AcmeOrderFailed { domain, status } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Acme validation failed for domain: {domain} with status: {status:?}"),
-            )
-                .into_response(),
-            Error::RustlsPem(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Cryptography Error").into_response()
-            }
-            Error::Rustls(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Cryptography Error").into_response()
-            }
-            Error::InvalidCustomSetup(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid custom path").into_response()
-            }
-            Error::InvalidHeader(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid header").into_response()
-            }
-            Error::WebPki(_) => (StatusCode::INTERNAL_SERVER_ERROR, "WebPki Error").into_response(),
-            Error::ServerName(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Server Name Error").into_response()
-            }
-            Error::Tempfile(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Tempfile Error").into_response()
-            }
-            Error::InvalidPrefix(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Invalid Prefix").into_response()
-            }
-            Error::SystemTime(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "SystemTime Error").into_response()
-            }
-            Error::Http(status, message) => (status, message).into_response(),
         }
     }
 }

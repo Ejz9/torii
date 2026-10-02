@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::time::Instant;
 use tokio::{fs, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -36,6 +37,7 @@ pub async fn acme_worker(
     let mut current_wildcard_certs = HashSet::new();
     let mut current_custom_certificates = HashSet::new();
     let mut sleep_duration = Duration::from_hours(60 * 24);
+    let mut failure_tracker = HashMap::new();
     fs::create_dir_all(&state.config.cert_path).await?;
     loop {
         tokio::select! {
@@ -54,9 +56,9 @@ pub async fn acme_worker(
                 active_map.extend(custom_certs);
                 state.certificates.store(Arc::new(active_map));
 
-                sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await;
+                sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates, &mut failure_tracker).await;
             }
-            _ = sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates).await; }
+            _ = sleep(sleep_duration) => { sleep_duration = refresh_certificates(&state, &acme_provider, current_individual_certs.clone(), current_wildcard_certs.clone(), &current_custom_certificates, &mut failure_tracker).await; }
         }
     }
     Ok(())
@@ -68,6 +70,7 @@ async fn refresh_certificates(
     individual_certs: HashSet<String>,
     wildcard_certs: HashSet<String>,
     custom_certs: &HashSet<String>,
+    failure_tracker: &mut HashMap<String, (u8, Instant)>,
 ) -> Duration {
     let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> =
         (**state.certificates.load()).clone();
@@ -83,7 +86,7 @@ async fn refresh_certificates(
     let account = match get_or_create_account(&state).await {
         Ok(account) => account,
         Err(e) => {
-            error!("Failed to get or create account: {}", e);
+            error!("Failed to get or create account: {e}");
             if !valid_certificates.is_empty() {
                 state.certificates.store(Arc::new(valid_certificates));
             }
@@ -93,18 +96,40 @@ async fn refresh_certificates(
 
     let mut encountered_error = false;
     for domain in needs_refresh {
-        let certificate =
-            match process_domain(&state, acme_provider, domain.to_string(), &wildcard_certs, &account).await {
-                Ok(cert) => cert,
-                Err(e) => {
-                    error!("Failed to process domain {}: {}", domain, e);
-                    encountered_error = true;
-                    continue;
-                }
-            };
+        if let Some(&(retries, timestamp)) = failure_tracker.get(&domain) {
+            if retries >= 4 && timestamp.elapsed() < Duration::from_hours(24) {
+                error!("Skipping {domain} for 24hrs to avoid rate limits");
+                encountered_error = true;
+                continue;
+            }
+        }
+        let certificate = match process_domain(
+            &state,
+            acme_provider,
+            domain.to_string(),
+            &wildcard_certs,
+            &account,
+        )
+        .await
+        {
+            Ok(cert) => {
+                failure_tracker.remove(&domain);
+                cert
+            }
+            Err(e) => {
+                error!("Failed to process domain {domain}: {e}");
+                let entry = failure_tracker
+                    .entry(domain.clone())
+                    .or_insert((0, Instant::now()));
+                entry.0 += 1;
+                entry.1 = Instant::now();
+                encountered_error = true;
+                continue;
+            }
+        };
 
         let key = if wildcard_certs.contains(&domain) {
-            format!("*.{}", domain)
+            format!("*.{domain}")
         } else {
             domain
         };
@@ -218,87 +243,56 @@ async fn create_missing(
     sleep_duration: &mut Duration,
     wildcard_certs: &HashSet<String>,
 ) -> Result<(), Error> {
-    if !fs::try_exists(dir).await? {
-        fs::create_dir_all(dir).await?;
-    }
     for domain in certs {
         let path = dir.join(domain);
         let cert_path = path.join("fullchain.pem");
         let key_path = path.join("privkey.pem");
-        match fs::create_dir(&path).await {
-            Ok(_) => {
-                needs_refresh.push(domain.clone());
-                continue;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !fs::try_exists(&cert_path).await.unwrap_or(false)
-                    || !fs::try_exists(&key_path).await.unwrap_or(false)
-                {
-                    needs_refresh.push(domain.clone());
-                    continue;
-                }
-            }
-            Err(e) => return Err(Error::Io(e)),
+        if let Err(e) = fs::create_dir_all(&path).await {
+            return Err(Error::Io(e));
         }
-        if !fs::try_exists(&path).await? {
-            fs::create_dir_all(&path).await?;
-            needs_refresh.push(domain.clone());
-            continue;
-        }
-        if !cert_path.exists() || !key_path.exists() {
-            needs_refresh.push(domain.clone());
-            continue;
-        }
-        let Ok(file_bytes) = fs::read(&cert_path).await else {
-            error!("Failed to read cert file for domain: {}", domain);
+        let Ok(cert_bytes) = fs::read(&cert_path).await else {
+            error!("Failed to read cert file for domain: {domain}");
             needs_refresh.push(domain.clone());
             continue;
         };
-        let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(&file_bytes) else {
-            error!("Failed to parse pem file for domain: {}", domain);
+        let Ok(key_bytes) = fs::read(key_path).await else {
+            needs_refresh.push(domain.clone());
+            error!("Failed to read key file for domain: {domain}");
+            continue;
+        };
+        let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(&cert_bytes) else {
+            error!("Failed to parse pem file for domain: {domain}");
             needs_refresh.push(domain.clone());
             continue;
         };
         let Ok((_, cert)) = x509_parser::parse_x509_certificate(&pem.contents) else {
-            error!("Failed to parse cert from pem file for domain: {}", domain);
+            error!("Failed to parse cert from pem file for domain: {domain}");
             needs_refresh.push(domain.clone());
             continue;
         };
-        let not_after = cert.tbs_certificate.validity.not_after;
-        if (not_after.timestamp() as u64) < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-            || (not_after.timestamp() as u64)
+        let not_after = cert.tbs_certificate.validity.not_after.timestamp() as u64;
+        if not_after < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+            || not_after
                 < SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
                     + Duration::from_hours(24 * 30).as_secs()
         {
             needs_refresh.push(domain.clone());
             continue;
         }
-        if not_after.timestamp() as u64 - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+        if not_after - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
             < sleep_duration.as_secs()
         {
             *sleep_duration = Duration::from_secs(
-                not_after.timestamp() as u64
-                    - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                not_after - SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
             );
         }
-        let Ok(key_bytes) = fs::read(key_path).await else {
-            error!("Failed to read key file for domain: {}", domain);
-            continue;
-        };
-        let Ok(cert_bytes) = fs::read(cert_path).await else {
-            error!("Failed to read cert file for domain: {}", domain);
-            continue;
-        };
         if let Err(e) = verify_certificate_signature(&state.cert_verifier, domain, &cert_bytes) {
-            error!(
-                "Failed to verify certificate signature for domain: {}: {}",
-                domain, e
-            );
+            error!("Failed to verify certificate signature for domain: {domain}: {e}",);
             needs_refresh.push(domain.clone());
             continue;
         }
         let Ok(certificate) = parse_certificate(key_bytes, cert_bytes) else {
-            error!("Failed to parse certificate for domain: {}", domain);
+            error!("Failed to parse certificate for domain: {domain}");
             continue;
         };
         let key = if wildcard_certs.contains(domain) {
@@ -404,10 +398,7 @@ async fn process_domain(
     }
     let status = order.poll_ready(&RetryPolicy::default()).await?;
     for (_, record_id) in cleanup_records {
-        if let Err(e) = acme_provider
-            .delete_txt_record(&record_id)
-            .await
-        {
+        if let Err(e) = acme_provider.delete_txt_record(&record_id).await {
             error!("Failed to delete TXT record: {}", e);
         }
     }
@@ -417,6 +408,7 @@ async fn process_domain(
     let private_key_pem = order.finalize().await?;
     let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
+    fs::create_dir_all(&save_path).await?;
     fs::write(save_path.join("privkey.pem"), &private_key_pem).await?;
     fs::write(save_path.join("fullchain.pem"), &cert_chain_pem).await?;
     let certificate = parse_certificate(private_key_pem.into_bytes(), cert_chain_pem.into_bytes())?;

@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use keidai::ConnectionEvent;
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -333,6 +334,7 @@ pub async fn run(
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
     hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     hashira_rx: tokio::sync::mpsc::Receiver<EbpfEntry>,
+    event_rx: flume::Receiver<ConnectionEvent>,
     interface: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -347,7 +349,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map BLOCKLIST_V4 from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut blocklist_v4) = HashMap::<_, u32, u8>::try_from(blocklist_v4_raw) else {
+    let Ok(blocklist_v4) = HashMap::<_, u32, u8>::try_from(blocklist_v4_raw) else {
         error!("FATAL: Failed to extract eBPF map BLOCKLIST_V4 from memory");
         std::process::exit(1);
     };
@@ -355,7 +357,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map BLOCKLIST_V6 from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut blocklist_v6) = HashMap::<_, [u8; 16], u8>::try_from(blocklist_v6_raw) else {
+    let Ok(blocklist_v6) = HashMap::<_, [u8; 16], u8>::try_from(blocklist_v6_raw) else {
         error!("FATAL: Failed to extract eBPF map BLOCKLIST_V6 from memory");
         std::process::exit(1);
     };
@@ -363,7 +365,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map BLOCKLIST_V4_PREFIX from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut blocklist_v4_prefix) = LpmTrie::<_, u32, u8>::try_from(blocklist_v4_prefix_raw)
+    let Ok(blocklist_v4_prefix) = LpmTrie::<_, u32, u8>::try_from(blocklist_v4_prefix_raw)
     else {
         error!("FATAL: Failed to extract eBPF map BLOCKLIST_V4_PREFIX from memory");
         std::process::exit(1);
@@ -372,7 +374,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map BLOCKLIST_V6_PREFIX from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut blocklist_v6_prefix) = LpmTrie::<_, [u8; 16], u8>::try_from(blocklist_v6_prefix_raw)
+    let Ok(blocklist_v6_prefix) = LpmTrie::<_, [u8; 16], u8>::try_from(blocklist_v6_prefix_raw)
     else {
         error!("FATAL: Failed to extract eBPF map BLOCKLIST_V6_PREFIX from memory");
         std::process::exit(1);
@@ -381,7 +383,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map CROWDSEC_V4 from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut mihari_v4) = LpmTrie::<_, u32, u8>::try_from(mihari_v4_raw) else {
+    let Ok(mihari_v4) = LpmTrie::<_, u32, u8>::try_from(mihari_v4_raw) else {
         error!("FATAL: Failed to extract eBPF map CROWDSEC_V4 from memory");
         std::process::exit(1);
     };
@@ -389,7 +391,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map CROWDSEC_V6 from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut mihari_v6) = LpmTrie::<_, [u8; 16], u8>::try_from(mihari_v6_raw) else {
+    let Ok(mihari_v6) = LpmTrie::<_, [u8; 16], u8>::try_from(mihari_v6_raw) else {
         error!("FATAL: Failed to extract eBPF map CROWDSEC_V6 from memory");
         std::process::exit(1);
     };
@@ -397,30 +399,20 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map METRICS from kekkai");
         std::process::exit(1);
     };
-    let Ok(mut metrics) = PerCpuArray::<_, u64>::try_from(metrics_raw) else {
+    let Ok(metrics) = PerCpuArray::<_, u64>::try_from(metrics_raw) else {
         error!("FATAL: Failed to extract eBPF map METRICS from memory");
         std::process::exit(1);
     };
     if state.config.ebpf_metrics {
         child_workers.spawn(metrics::run(metrics, cancel_token.clone()));
     }
-    /*
-    if state.remote_sidecars {
-        let addr = format!(
-            "{}:{}",
-            state.config.host, state.config.sidecar_listener_port
-        );
-    }
-    */
     child_workers.spawn(hashira::run(
-        state.config.hashira_shm_capacity,
-        //state.config.remote_sidecars,
-        //addr,
         Arc::clone(&state.dynamic_config),
         blocklist_v4,
         blocklist_v6,
         hashira_tx,
         hashira_rx,
+        event_rx,
         cancel_token.clone(),
     ));
     child_workers.spawn(ofuda::run(
@@ -506,7 +498,7 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
         .context("FATAL: Failed to find named program inside the compiled eBPF ELF file")?
         .try_into()?;
     program.load()?;
-    program.attach(iface, XdpMode::Skb)
+    program.attach(iface, XdpMode::Driver)
         .context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
 
     log::info!("Kekkai eBPF successfully attached to {}", iface);

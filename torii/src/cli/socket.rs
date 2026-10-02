@@ -25,7 +25,7 @@ use crate::{
 };
 
 pub async fn listener(
-    mut dynamic_config: Arc<ArcSwap<ActiveState>>,
+    dynamic_config: Arc<ArcSwap<ActiveState>>,
     cert_verifier: Arc<WebPkiServerVerifier>,
     acme_tx: Option<tokio::sync::mpsc::Sender<(
         HashSet<String>,

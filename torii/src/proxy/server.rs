@@ -1,19 +1,19 @@
 use arc_swap::ArcSwap;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
-use moka::sync::Cache;
+use keidai::ConnectionEvent;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpListener, sync::mpsc::Sender};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{
+    net::TcpListener,
+};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
-use tracing::{debug, error, info};
-
-use crate::ebpf::hashira::EbpfEntry;
+use tracing::{debug, error};
 
 #[derive(Debug)]
 pub struct CertificateResolver {
@@ -34,9 +34,12 @@ impl ResolvesServerCert for CertificateResolver {
             return Some(cert.clone());
         }
         if let Some((_, root)) = domain.split_once('.') {
-            let wildcard = format!("*.{}", root);
-            if let Some(cert) = certificates.get(&wildcard) {
-                return Some(cert.clone());
+            for (key, cert) in certificates.iter() {
+                if let Some(suffix) = key.strip_prefix("*.") {
+                    if suffix == root {
+                        return Some(cert.clone());
+                    }
+                }
             }
         }
         None
@@ -47,75 +50,81 @@ pub async fn serve(
     listener: TcpListener,
     routes: Router,
     acceptor: TlsAcceptor,
-    l4_rate_limiter: Cache<IpAddr, u32>,
-    hashira_tx: Sender<EbpfEntry>,
+    event_tx: flume::Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
-        let (tcp_stream, remote_addr) = tokio::select! {
+        let permit = tokio::select! {
             biased;
-            _ = cancel_token.cancelled() => {
-                info!("Server recieved shutdown signal. Halting listener.");
-                break;
-            }
-            res = listener.accept() => {
-                let Ok(conn) = res else {
-                    continue;
-                };
-                conn
+            _ = cancel_token.cancelled() => break,
+            res = handshake_limiter.clone().acquire_owned() => {
+                let Ok(p) = res else { break };
+                p
             }
         };
-
-        let connections = l4_rate_limiter.get_with(remote_addr.ip(), || 0) + 1;
-        l4_rate_limiter.insert(remote_addr.ip(), connections);
-
-        if connections > 50 {
-            match remote_addr.ip() {
-                IpAddr::V4(addr) => {
-                    let _ = hashira_tx.try_send(EbpfEntry::InsertIpv4(addr.into()));
-                }
-                IpAddr::V6(addr) => {
-                    let _ = hashira_tx.try_send(EbpfEntry::InsertIpv6Addr(addr.octets()));
-                }
-            }
-            continue;
-        }
-
-        let tls_acceptor = acceptor.clone();
-        let app = routes.clone();
-
-        tokio::spawn(async move {
-            match tls_acceptor.accept(tcp_stream).await {
-                Ok(stream) => {
-                    let io = hyper_util::rt::TokioIo::new(stream);
-                    let service = hyper::service::service_fn(move |mut req| {
-                        req.extensions_mut()
-                            .insert(axum::extract::ConnectInfo(remote_addr));
-                        app.clone().call(req)
-                    });
-
-                    let mut auto_builder =
-                        hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-
-                    auto_builder
-                        .http1()
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(Duration::from_secs(5))
-                        .keep_alive(true);
-                    auto_builder
-                        .http2()
-                        .timer(TokioTimer::new())
-                        .keep_alive_interval(Some(Duration::from_secs(15)))
-                        .max_concurrent_streams(100);
-
-                    if let Err(e) = auto_builder
-                        .serve_connection_with_upgrades(io, service)
-                        .await
-                    {
-                        handle_connection_error(e);
+        let (tcp_stream, remote_addr) = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            res = listener.accept() => {
+                match res {
+                    Ok(conn) => conn,
+                    Err(_) => {
+                        drop(permit);
+                        continue;
                     }
                 }
-                Err(e) => error!("TLS Handshake failed: {}", e),
+            }
+        };
+        let _ = tcp_stream.set_nodelay(true);
+        let tls_acceptor = acceptor.clone();
+        let app = routes.clone();
+        let tx = event_tx.clone();
+
+        tokio::task::spawn(async move {
+            let stream =
+                match tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
+                    .await
+                {
+                    Ok(Ok(stream)) => {
+                        drop(permit);
+                        stream
+                    }
+                    _ => {
+                        drop(permit);
+                        let _ =
+                            tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
+                        return;
+                    }
+                };
+            let is_h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let service = hyper::service::service_fn(move |mut req| {
+                req.extensions_mut()
+                    .insert(axum::extract::ConnectInfo(remote_addr));
+                app.clone().call(req)
+            });
+
+            if is_h2 {
+                let mut h2 = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                h2.timer(TokioTimer::new())
+                    .keep_alive_interval(Some(Duration::from_secs(65)))
+                    .max_concurrent_streams(1000)
+                    //.max_frame_size(Some(64 * 1024))
+                    .adaptive_window(true)
+                    .max_send_buf_size(16 * 1024);
+                if let Err(e) = h2.serve_connection(io, service).await {
+                    handle_connection_error(Box::new(e));
+                }
+            } else {
+                let mut http1 = hyper::server::conn::http1::Builder::new();
+                http1
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(Duration::from_secs(5))
+                    .keep_alive(true);
+                if let Err(e) = http1.serve_connection(io, service).with_upgrades().await {
+                    handle_connection_error(Box::new(e));
+                }
             }
         });
     }

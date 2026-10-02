@@ -1,18 +1,15 @@
-use std::{
-    hash::RandomState,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use crate::error::Error;
 use crate::state::AppState;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{IntoResponse, Redirect};
+use biscuit_auth::macros::biscuit;
 use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
 use moka::future::Cache;
 use serde::Deserialize;
@@ -29,11 +26,11 @@ pub struct OidcProvider {
 
 #[derive(Debug, Deserialize)]
 pub struct Endpoints {
-    pub issuer: String,
+    //pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
-    pub userinfo_endpoint: String,
-    pub end_session_endpoint: String,
+    //pub userinfo_endpoint: String,
+    //pub end_session_endpoint: String,
     pub jwks_uri: String,
     pub grant_types_supported: Option<Vec<String>>,
 }
@@ -111,17 +108,11 @@ pub struct AuthCallbackQuery {
 
 #[derive(Deserialize, Clone)]
 pub struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
+    //pub access_token: String,
+    //pub refresh_token: Option<String>,
     pub id_token: String,
-    pub token_type: String,
+    //pub token_type: String,
     pub expires_in: u64,
-}
-
-#[derive(Deserialize, Clone)]
-pub struct ActiveSession {
-    pub user_token: TokenResponse,
-    pub claims: Claims,
 }
 
 static TTL_WARNED: AtomicBool = AtomicBool::new(false);
@@ -170,16 +161,25 @@ pub async fn auth_callback(
                 );
             }
         }
-        let session = ActiveSession {
-            user_token: response,
-            claims: valid_claims,
-        };
-        let session_id = Uuid::new_v4().to_string();
+
+        let mut builder = biscuit!(
+            r#"
+            user({sub});
+            check if time($time), $time <= {exp};
+            "#,
+            sub = valid_claims.sub,
+            exp = valid_claims.exp as i64,
+        );
+        if let Some(groups) = &valid_claims.groups {
+            for group in groups {
+                builder = builder.fact(format!("group(\"{}\")", group).as_str())?;
+            }
+        }
+        let session_token = builder.build(&state.root_keypair)?;
         let cookie = format!(
-            "torii_session={}; HttpOnly; Path=/; SameSite=Lax",
-            session_id
-        ); //TODO Add "Secure" when in prod not local testing
-        state.session_cache.insert(session_id, session).await;
+            "torii_session={}; HttpOnly; Secure; Path=/; SameSite=Lax",
+            session_token.to_base64()?
+        );
         Ok((
             [(header::SET_COOKIE, cookie)],
             Redirect::temporary(&return_url),
@@ -194,8 +194,8 @@ pub async fn auth_callback(
 pub struct Claims {
     pub sub: String,
     pub exp: u64,
-    pub preferred_name: Option<String>,
-    pub name: String,
+    //pub preferred_name: Option<String>,
+    //pub name: String,
     pub groups: Option<Vec<String>>,
 }
 
@@ -237,9 +237,9 @@ pub enum Jwk {
 
 #[derive(Deserialize)]
 pub struct RsaKey {
-    alg: String,
+    //alg: String,
     kid: String,
-    kty: String,
+    //kty: String,
     #[serde(rename = "use")]
     key_use: Option<String>,
     n: String,
@@ -248,12 +248,12 @@ pub struct RsaKey {
 
 #[derive(Deserialize)]
 pub struct EcKey {
-    alg: String,
+    //alg: String,
     kid: String,
-    kty: String,
+    //kty: String,
     #[serde(rename = "use")]
     key_use: Option<String>,
-    crv: String,
+    //crv: String,
     x: String,
     y: String,
 }
@@ -302,6 +302,4 @@ pub async fn fetch_jwks(
     Ok(())
 }
 
-pub async fn exchange_tunnel_key(headers: HeaderMap) -> () {
-    todo!("Gen and exchange tunnel_key")
-}
+//TODO: OIDC Back-Channel Logout (likely via webhooks)
