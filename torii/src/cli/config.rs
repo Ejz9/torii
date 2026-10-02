@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    ops::Deref,
     str::FromStr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -41,12 +42,13 @@ impl Default for ToriiConfig {
 pub struct ActiveState {
     pub ddns_domain: Option<String>,
     pub security: SecurityConfig,
-    pub routes: matchit::Router<ActiveRoute>,
+    pub routes: matchit::Router<Arc<ActiveRoute>>,
 }
 
+#[derive(Clone)]
 pub struct RouteMatch {
-    pub route: ActiveRoute,
-    pub catch_all: String,
+    pub route: Arc<ActiveRoute>,
+    pub catch_all: SmallPath,
 }
 
 impl ActiveState {
@@ -112,11 +114,12 @@ impl ActiveState {
                     };
                 valid_certificates.insert(clean_route.to_string(), certificate);
             }
+            let active_route = Arc::new(value.try_into()?);
             let exact_pattern = format!("/{}", clean_route);
-            router.insert(exact_pattern, value.clone().try_into()?)?;
+            router.insert(exact_pattern, Arc::clone(&active_route))?;
 
             let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
-            router.insert(catch_all_pattern, value.try_into()?)?;
+            router.insert(catch_all_pattern, active_route)?;
         }
 
         Ok((
@@ -135,15 +138,28 @@ impl ActiveState {
         if path == "/" {
             path = "";
         }
-        let route = format!("/{}{}", host, path);
-        let Ok(matched_route) = self.routes.at(&route) else {
+        let mut buf = [0u8; 512];
+        buf[0] = b'/';
+        let h_bytes = host.as_bytes();
+        let p_bytes = path.as_bytes();
+        let total_len = 1 + h_bytes.len() + p_bytes.len();
+        if total_len > buf.len() {
             return None;
+        }
+        buf[1..1 + h_bytes.len()].copy_from_slice(h_bytes);
+        buf[1 + h_bytes.len()..total_len].copy_from_slice(p_bytes);
+        let route = std::str::from_utf8(&buf[..total_len]).ok()?;
+        let matched_route = self.routes.at(route).ok()?;
+        let catch_all = match matched_route.params.get("catch_all") {
+            Some(ca) if ca.starts_with('/') => SmallPath::from_str(ca),
+            Some(ca) => {
+                let mut s = String::with_capacity(ca.len() + 1);
+                s.push('/');
+                s.push_str(ca);
+                SmallPath::from_str(&s)
+            }
+            None => SmallPath::Static("/"),
         };
-        let catch_all = matched_route
-            .params
-            .get("catch_all")
-            .unwrap_or("")
-            .to_string();
         Some(RouteMatch {
             route: matched_route.value.clone(),
             catch_all,
@@ -256,6 +272,8 @@ fn default_path_matcher() -> Arc<AhoCorasick> {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RouteConfig {
     upstream: String,
+    #[serde(default = "default_max_connections")]
+    max_concurrent_connections: usize,
     #[serde(default)]
     public_bypass: bool,
     #[serde(default)]
@@ -272,11 +290,17 @@ pub struct RouteConfig {
     allowed_groups: Vec<String>,
 }
 
+fn default_max_connections() -> usize {
+    256
+}
+
 #[derive(Clone)]
 pub struct ActiveRoute {
     pub upstream: http::Uri,
-    pub upstream_clean: String,
-    pub upstream_host_header: String,
+    pub upstream_limiter: Arc<tokio::sync::Semaphore>,
+    pub upstream_scheme: Option<http::uri::Scheme>,
+    pub upstream_authority: Option<http::uri::Authority>,
+    pub upstream_host_header: http::HeaderValue,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
     pub allowed_asset_paths: Vec<String>,
@@ -287,15 +311,21 @@ impl TryFrom<RouteConfig> for ActiveRoute {
     type Error = Error;
     fn try_from(config: RouteConfig) -> Result<Self, Self::Error> {
         let upstream: http::Uri = config.upstream.parse()?;
-        let upstream_clean = config.upstream.trim_end_matches('/').to_string();
-        let upstream_host_header = upstream
+        let upstream_scheme = upstream.scheme().cloned();
+        let upstream_authority = upstream.authority().cloned();
+        let upstream_host_str = upstream
             .authority()
             .map(|a| a.as_str())
-            .unwrap_or("localhost")
-            .to_string();
+            .unwrap_or("localhost");
+        let upstream_host_header = http::HeaderValue::from_str(upstream_host_str)?;
+        let upstream_limiter = Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_connections,
+        ));
         Ok(ActiveRoute {
             upstream,
-            upstream_clean,
+            upstream_limiter,
+            upstream_scheme,
+            upstream_authority,
             upstream_host_header,
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
@@ -322,5 +352,53 @@ impl FromStr for DomainTier {
             3 => Ok(DomainTier::Subdomain),
             _ => Ok(DomainTier::Nested),
         }
+    }
+}
+
+#[derive(Clone)]
+pub enum SmallPath {
+    Static(&'static str),
+    Inline { buf: [u8; 30], len: u8 },
+    Heap(String),
+}
+
+impl SmallPath {
+    #[inline]
+    pub fn from_str(s: &str) -> Self {
+        if s == "/" {
+            return SmallPath::Static("/");
+        }
+        let bytes = s.as_bytes();
+        if bytes.len() <= 30 {
+            let mut buf = [0u8; 30];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            SmallPath::Inline {
+                buf,
+                len: bytes.len() as u8,
+            }
+        } else {
+            SmallPath::Heap(s.to_string())
+        }
+    }
+}
+
+impl Deref for SmallPath {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        match self {
+            SmallPath::Static(s) => s,
+            SmallPath::Inline { buf, len } => {
+                std::str::from_utf8(&buf[..*len as usize]).unwrap_or("")
+            }
+            SmallPath::Heap(s) => s.as_str(),
+        }
+    }
+}
+
+impl AsRef<str> for SmallPath {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.deref()
     }
 }

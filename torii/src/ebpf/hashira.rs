@@ -27,16 +27,12 @@ pub enum EbpfEntry {
 }
 
 pub async fn run(
-    // Change this and other workers to return a result -> Result<(), Error>
-    size: u32,
-    //remote_sidecars: bool,
-    //addr: String,
-    mut dynamic_config: Arc<ArcSwap<ActiveState>>,
+    dynamic_config: Arc<ArcSwap<ActiveState>>,
     mut blocklist_v4: HashMap<MapData, u32, u8>,
     mut blocklist_v6: HashMap<MapData, [u8; 16], u8>,
     hashira_tx: Sender<EbpfEntry>,
     mut hashira_rx: Receiver<EbpfEntry>,
-    mut event_rx: Receiver<ConnectionEvent>,
+    event_rx: flume::Receiver<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut child_workers: JoinSet<anyhow::Result<()>> = JoinSet::new();
@@ -160,15 +156,15 @@ impl PolicyEngine {
             .build();
         let offense_history: Cache<IpAddr, u32> = Cache::builder()
             .time_to_live(Duration::from_hours(24))
-            .max_capacity(100_000)
+            .max_capacity(20_000)
             .build();
         let velocity_tracker: Cache<IpAddr, u32> = Cache::builder()
             .time_to_live(Duration::from_secs(1))
-            .max_capacity(100_000)
+            .max_capacity(20_000)
             .build();
         let strike_limiters: Cache<IpAddr, Arc<IpLimiter>> = Cache::builder()
             .time_to_live(Duration::from_secs(300))
-            .max_capacity(100_000)
+            .max_capacity(20_000)
             .build();
         Self {
             ban_v4,

@@ -94,16 +94,12 @@ impl AppState {
         }
         info!("Preparing resources...");
         let csrf_cache: Cache<String, String> = Cache::builder()
-            .max_capacity(10_000)
+            .max_capacity(1000)
             .time_to_live(Duration::from_secs(300))
-            .build();
-        let session_cache: Cache<String, ActiveSession> = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_hours(168))
             .build();
         let jwks_cache: Cache<String, DecodingKey> = Cache::new(20);
         let limiter_cache: Cache<String, ()> = Cache::builder()
-            .max_capacity(10_000)
+            .max_capacity(10)
             .time_to_live(Duration::from_secs(15))
             .build();
         let configuration_file = read_to_string(config_path).await?;
@@ -154,7 +150,8 @@ impl AppState {
         http.set_nodelay(true);
         http.set_keepalive(Some(Duration::from_secs(60)));
         let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()?
+            .with_native_roots()
+            .expect("valid native roots")
             .https_or_http()
             .enable_http1()
             .wrap_connector(http.clone());

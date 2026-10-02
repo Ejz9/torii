@@ -53,43 +53,50 @@ pub async fn serve(
     event_tx: Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
-    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(256));
+    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
+        let permit = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            res = handshake_limiter.clone().acquire_owned() => {
+                let Ok(p) = res else { break };
+                p
+            }
+        };
         let (tcp_stream, remote_addr) = tokio::select! {
             biased;
-            _ = cancel_token.cancelled() => {
-                info!("Server recieved shutdown signal. Halting listener.");
-                break;
-            }
+            _ = cancel_token.cancelled() => break,
             res = listener.accept() => {
-                let Ok(conn) = res else {
-                    continue;
-                };
-                conn
+                match res {
+                    Ok(conn) => conn,
+                    Err(_) => {
+                        drop(permit);
+                        continue;
+                    }
+                }
             }
         };
         let _ = tcp_stream.set_nodelay(true);
         let tls_acceptor = acceptor.clone();
         let app = routes.clone();
-        let limiter = Arc::clone(&handshake_limiter);
         let tx = event_tx.clone();
 
-        tokio::spawn(async move {
-            let Ok(permit) = limiter.acquire_owned().await else {
-                return;
-            };
-            let stream = match tls_acceptor.accept(tcp_stream).await {
-                Ok(stream) => {
-                    drop(permit);
-                    stream
-                }
-                Err(e) => {
-                    drop(permit);
-                    debug!("TLS Handshake failed: {}", e);
-                    let _ = tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
-                    return;
-                }
-            };
+        tokio::task::spawn(async move {
+            let stream =
+                match tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
+                    .await
+                {
+                    Ok(Ok(stream)) => {
+                        drop(permit);
+                        stream
+                    }
+                    _ => {
+                        drop(permit);
+                        let _ =
+                            tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
+                        return;
+                    }
+                };
             let is_h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
             let io = hyper_util::rt::TokioIo::new(stream);
             let service = hyper::service::service_fn(move |mut req| {
@@ -99,20 +106,21 @@ pub async fn serve(
             });
 
             if is_h2 {
-                let mut h2 = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-                h2.http2()
-                    .timer(TokioTimer::new())
+                let mut h2 = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+                h2.timer(TokioTimer::new())
                     .keep_alive_interval(Some(Duration::from_secs(65)))
-                    .max_concurrent_streams(1000);
-                if let Err(e) = h2.serve_connection_with_upgrades(io, service).await {
-                    handle_connection_error(e);
+                    .max_concurrent_streams(1000)
+                    //.max_frame_size(Some(64 * 1024))
+                    .adaptive_window(true)
+                    .max_send_buf_size(16 * 1024);
+                if let Err(e) = h2.serve_connection(io, service).await {
+                    handle_connection_error(Box::new(e));
                 }
             } else {
                 let mut http1 = hyper::server::conn::http1::Builder::new();
                 http1
                     .timer(TokioTimer::new())
                     .header_read_timeout(Duration::from_secs(5))
-                    .pipeline_flush(true)
                     .keep_alive(true);
                 if let Err(e) = http1.serve_connection(io, service).with_upgrades().await {
                     handle_connection_error(Box::new(e));

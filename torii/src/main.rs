@@ -7,6 +7,10 @@ mod error;
 mod proxy;
 mod state;
 mod tunnel;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
@@ -76,13 +80,13 @@ async fn main() -> anyhow::Result<()> {
             let worker_token = root_token.child_token();
             let network_token = root_token.child_token();
             let mut worker_set: JoinSet<anyhow::Result<()>> = JoinSet::new();
-            let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(1024);
+            let (ofuda_tx, ofuda_rx) = mpsc::channel::<OfudaEntry>(32);
             let (acme_tx, acme_rx) = if config.acme_provider.is_some() {
                 let (tx, rx) = mpsc::channel::<(
                     HashSet<String>,
                     HashSet<String>,
                     HashMap<String, Arc<CertifiedKey>>,
-                )>(20);
+                )>(32);
                 (Some(tx), Some(rx))
             } else {
                 (None, None)
@@ -92,11 +96,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let (hashira_tx, mut hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(100_000);
-            let l4_rate_limiter: Cache<IpAddr, u32> = Cache::builder()
-                .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(1))
-                .build();
+            let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(10_000);
+            let (event_tx, event_rx) = flume::bounded::<ConnectionEvent>(10_000);
             let state = Arc::new(
                 AppState::new(config, cli.config, acme_tx.clone())
                     .await
