@@ -1785,7 +1785,11 @@ dependencies = [
 name = "keidai"
 version = "0.1.0"
 dependencies = [
- "linux-futex",
+ "anyhow",
+ "postcard",
+ "quinn",
+ "serde",
+ "tokio",
  "zerocopy",
 ]
 
@@ -1818,15 +1822,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
-]
-
-[[package]]
-name = "linux-futex"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca13551457f48de808024473c481e3978eb6ea5e7f345433eb0f9c3b325fc1ca"
-dependencies = [
- "libc",
 ]
 
 [[package]]

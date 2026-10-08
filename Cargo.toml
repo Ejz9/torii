@@ -23,6 +23,8 @@ log = { version = "0.4.22", default-features = false }
 which = { version = "6.0.0", default-features = false }
 keidai = { path = "keidai" }
 zerocopy = { version = "0.8.55", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["full"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
 quinn = { version = "0.11.11", default-features = false, features = [
     "aws-lc-rs",
     "rustls-aws-lc-rs",

@@ -1,6 +1,10 @@
-use std::net::{IpAddr, Ipv6Addr};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv6Addr},
+};
 
-use linux_futex::{Futex, Shared};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
@@ -63,8 +67,62 @@ impl ConnectionEvent {
     }
 }
 
-#[repr(C)]
-pub struct BufferHeader {
-    pub write_head: Futex<Shared>,
-    pub read_head: Futex<Shared>,
+#[derive(Serialize, Deserialize)]
+pub enum ControlMessage {
+    Auth { token: Vec<u8> },
+    SyncConfig(SidecarConfig),
+    RequestCert { domain: String, csr: Vec<u8> },
+    CertResponse { domain: String, cert_chain: String },
+    CertError { domain: String, reason: String },
+    Ready,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RouteConfig {
+    pub upstream: String,
+    #[serde(default = "default_max_connections")]
+    pub max_concurrent_connections: usize,
+    #[serde(default)]
+    pub public_bypass: bool,
+    #[serde(default)]
+    pub tls_insecure_skip_verify: bool,
+    #[serde(default)]
+    pub individual_cert: bool,
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    #[serde(default)]
+    pub allowed_asset_paths: Vec<String>,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+}
+
+fn default_max_connections() -> usize {
+    256
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SidecarConfig {
+    #[serde(default)]
+    pub routes: HashMap<String, RouteConfig>,
+    #[serde(default)]
+    pub forbidden_paths: Vec<String>,
+}
+
+pub async fn send_control(
+    stream: &mut quinn::SendStream,
+    msg: &ControlMessage,
+) -> anyhow::Result<()> {
+    let bytes = postcard::to_allocvec(msg)?;
+    stream.write_u16(bytes.len() as u16).await?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
+
+pub async fn recv_control(stream: &mut quinn::RecvStream) -> anyhow::Result<ControlMessage> {
+    let len = stream.read_u16().await? as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(postcard::from_bytes(&buf)?)
 }

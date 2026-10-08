@@ -10,5 +10,9 @@ default = []
 path = "src/lib.rs"
 
 [dependencies]
-linux-futex = "1.0.0"
+anyhow = { workspace = true }
+postcard = { workspace = true }
+quinn = { workspace = true }
+serde = "1.0.229"
+tokio = { workspace = true }
 zerocopy = { workspace = true }
