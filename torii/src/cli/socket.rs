@@ -1,4 +1,5 @@
 use arc_swap::ArcSwap;
+use keidai::{ControlMessage, SidecarConfig, send_control};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -26,12 +27,15 @@ use crate::{
 
 pub async fn listener(
     dynamic_config: Arc<ArcSwap<ActiveState>>,
+    config_reload_tx: tokio::sync::broadcast::Sender<()>,
     cert_verifier: Arc<WebPkiServerVerifier>,
-    acme_tx: Option<tokio::sync::mpsc::Sender<(
-        HashSet<String>,
-        HashSet<String>,
-        HashMap<String, Arc<CertifiedKey>>,
-    )>>,
+    acme_tx: Option<
+        tokio::sync::mpsc::Sender<(
+            HashSet<String>,
+            HashSet<String>,
+            HashMap<String, Arc<CertifiedKey>>,
+        )>,
+    >,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
     kekkai_path: String,
@@ -77,6 +81,7 @@ pub async fn listener(
             SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
                 Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
                     dynamic_config.store(Arc::new(config));
+                    let _ = config_reload_tx.send(());
                     if let Some(acme_tx) = &acme_tx {
                         let _ = acme_tx
                             .send((individual_certs, wildcard_certs, custom_certs))

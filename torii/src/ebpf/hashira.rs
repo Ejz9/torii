@@ -303,7 +303,8 @@ fn check_method(method: &[u8]) -> u32 {
         return PENALTY_INSTANT;
     }
     match method {
-        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" | b"TLS" => 0,
+        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" | b"TLS"
+        | b"QUIC" => 0,
         _ => PENALTY_INSTANT,
     }
 }

@@ -49,6 +49,7 @@ use crate::proxy::middleware::temizuya;
 use crate::proxy::router::handle_any;
 use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
+use crate::tunnel::sando;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
@@ -101,12 +102,14 @@ async fn main() -> anyhow::Result<()> {
             };
             let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(10_000);
             let (event_tx, event_rx) = flume::bounded::<ConnectionEvent>(10_000);
+            let (config_reload_tx, _) = tokio::sync::broadcast::channel::<()>(1);
             let state = Arc::new(
                 AppState::new(
                     config,
                     cli.config,
                     acme_tx.clone(),
                     event_tx.clone(),
+                    config_reload_tx.clone(),
                     root_keypair,
                 )
                 .await
@@ -128,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
             ));
             worker_set.spawn(socket::listener(
                 Arc::clone(&state.dynamic_config),
+                config_reload_tx,
                 Arc::clone(&state.cert_verifier),
                 acme_tx,
                 ofuda_tx,
@@ -152,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
                     ));
                 }
             }
+            worker_set.spawn(sando::listener(network_token.clone(), state.clone()));
             if let Some(endpoints) = &state.endpoints {
                 fetch_jwks(&endpoints, &state.jwks_cache).await?;
             }
@@ -182,10 +187,11 @@ async fn main() -> anyhow::Result<()> {
             let socket_addr: SocketAddr = addr.parse()?;
             let nr_cpus = std::thread::available_parallelism()?.get();
             let mut servers = Vec::new();
+            let handshake_limit = (nr_cpus * 128).clamp(256, 1024);
             for _ in 0..nr_cpus {
                 let socket_addr = socket_addr;
                 let app = app.clone();
-                let acceptor = acceptor.clone();
+                let acceptor = acceptor.clone(); // Is this necessary?
                 let event_tx = event_tx.clone();
                 let network_token = network_token.clone();
                 let socket = match socket_addr {
@@ -212,13 +218,13 @@ async fn main() -> anyhow::Result<()> {
                     acceptor.clone(),
                     event_tx.clone(),
                     network_token.clone(),
+                    handshake_limit,
+                    state.dynamic_config.clone(),
+                    state.sidecars.clone(),
                 )));
             }
             info!("Listening on {} across {} listeners...", addr, nr_cpus);
 
-            // Add hashira use in the main server worker or for specialized / auth endpoints.
-            // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
-            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii
             select! {
                 _ = tokio::signal::ctrl_c() => {}
                 Some(result) = worker_set.join_next() => {

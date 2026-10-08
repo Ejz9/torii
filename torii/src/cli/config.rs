@@ -9,6 +9,7 @@ use std::{
 
 use aho_corasick::AhoCorasick;
 use axum::http;
+use keidai::{RouteConfig, SidecarConfig};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -27,6 +28,8 @@ pub struct ToriiConfig {
     security: SecurityConfig,
     #[serde(default)]
     routes: HashMap<String, RouteConfig>,
+    #[serde(default)]
+    sidecars: HashMap<String, SidecarConfig>,
 }
 
 impl Default for ToriiConfig {
@@ -35,6 +38,7 @@ impl Default for ToriiConfig {
             ddns_domain: None,
             security: SecurityConfig::default(),
             routes: HashMap::new(),
+            sidecars: HashMap::new(),
         }
     }
 }
@@ -43,6 +47,8 @@ pub struct ActiveState {
     pub ddns_domain: Option<String>,
     pub security: SecurityConfig,
     pub routes: matchit::Router<Arc<ActiveRoute>>,
+    pub sidecar_routes: HashMap<String, String>,
+    pub sidecars: HashMap<String, SidecarConfig>,
 }
 
 #[derive(Clone)]
@@ -122,11 +128,21 @@ impl ActiveState {
             router.insert(catch_all_pattern, active_route)?;
         }
 
+        let mut sidecar_routes = HashMap::new();
+        for (sidecar_id, sidecar_cfg) in &config.sidecars {
+            for route in sidecar_cfg.routes.keys() {
+                let clean_route = route.trim_end_matches('/');
+                sidecar_routes.insert(clean_route.to_string(), sidecar_id.clone());
+            }
+        }
+
         Ok((
             ActiveState {
                 ddns_domain: config.ddns_domain,
                 security: config.security,
                 routes: router,
+                sidecar_routes,
+                sidecars: config.sidecars,
             },
             individual_certs,
             wildcard_certs,
@@ -226,7 +242,7 @@ pub struct SecurityConfig {
     #[serde(default = "default_certificate_mode_wildcard")]
     default_certificate_mode_wildcard: bool,
     #[serde(default = "forbidden_paths")]
-    forbidden_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
     #[serde(default = "ebpf_strike_threshold")]
     pub ebpf_strike_threshold: u64,
     #[serde(default = "ebpf_velocity_threshhold")]
@@ -267,31 +283,6 @@ fn ebpf_lockout_duration_secs() -> u64 {
 }
 fn default_path_matcher() -> Arc<AhoCorasick> {
     Arc::new(AhoCorasick::new(Vec::<&[u8]>::new()).unwrap())
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RouteConfig {
-    upstream: String,
-    #[serde(default = "default_max_connections")]
-    max_concurrent_connections: usize,
-    #[serde(default)]
-    public_bypass: bool,
-    #[serde(default)]
-    tls_insecure_skip_verify: bool,
-    #[serde(default)]
-    individual_cert: bool,
-    #[serde(default)]
-    tls_cert_path: Option<String>,
-    #[serde(default)]
-    tls_key_path: Option<String>,
-    #[serde(default)]
-    allowed_asset_paths: Vec<String>,
-    #[serde(default)]
-    allowed_groups: Vec<String>,
-}
-
-fn default_max_connections() -> usize {
-    256
 }
 
 #[derive(Clone)]
