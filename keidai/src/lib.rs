@@ -71,9 +71,9 @@ impl ConnectionEvent {
 pub enum ControlMessage {
     Auth { token: Vec<u8> },
     SyncConfig(SidecarConfig),
-    RequestCert { domain: String, csr: Vec<u8> },
+    CertRequest { domain: String, csr: Vec<u8> },
     CertResponse { domain: String, cert_chain: String },
-    CertError { domain: String, reason: String },
+    CertError { domain: String, error: String },
     Ready,
 }
 

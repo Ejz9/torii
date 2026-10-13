@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use zerocopy::IntoBytes;
 
-use crate::{error::Error, state::AppState};
+use crate::{acme::dns::sign_csr, error::Error, state::AppState};
 
 pub fn load_or_generate_tunnel_cert(
     sando_path: &str,
@@ -153,13 +153,17 @@ async fn handle_sidecar(
         routes: sidecar_cfg.routes.clone(),
         forbidden_paths: active.security.forbidden_paths.clone(),
     });
-    let _ = send_control(&mut send_stream, &msg).await?;
+    send_control(&mut send_stream, &msg).await?;
 
-    let Ok(Ok(ControlMessage::Ready)) =
-        tokio::time::timeout(Duration::from_secs(10), recv_control(&mut recv_stream)).await
-    else {
-        anyhow::bail!("Expected Ready message from sidecar '{id}'")
-    };
+    loop {
+        match tokio::time::timeout(Duration::from_secs(120), recv_control(&mut recv_stream)).await {
+            Ok(Ok(ControlMessage::Ready)) => break,
+            Ok(Ok(ControlMessage::CertRequest { domain, csr })) => {
+                handle_cert_request(&state, &id, &mut send_stream, domain, csr).await?
+            }
+            _ => anyhow::bail!("Unexpected control message from sidecar '{id}'"),
+        }
+    }
 
     let mut map = (**state.sidecars.load()).clone();
     map.insert(id.clone(), connection.clone());
@@ -182,12 +186,20 @@ async fn handle_sidecar(
                 if let Some(config) = dynamic_config.sidecars.get(&id) {
                     let msg = ControlMessage::SyncConfig(SidecarConfig {
                         routes: config.routes.clone(),
-                        forbidden_paths: active.security.forbidden_paths.clone(),
+                        forbidden_paths: dynamic_config.security.forbidden_paths.clone(),
                     });
                     if let Err(e) = send_control(&mut send_stream, &msg).await {
                         error!("Failed to send reloaded config to sidecar '{id}': {e}");
                         break;
                     }
+                }
+            }
+            req = recv_control(&mut recv_stream) => {
+                match req {
+                    Ok(ControlMessage::CertRequest { domain, csr }) => {
+                        handle_cert_request(&state, &id, &mut send_stream, domain, csr).await?;
+                    }
+                    _ => break,
                 }
             }
             res = event_stream.read_exact(event.as_mut_bytes()) => {
@@ -206,5 +218,34 @@ async fn handle_sidecar(
     map.remove(&id);
     state.sidecars.store(Arc::new(map));
 
+    Ok(())
+}
+
+async fn handle_cert_request(
+    state: &AppState,
+    id: &str,
+    send_stream: &mut quinn::SendStream,
+    domain: String,
+    csr: Vec<u8>,
+) -> anyhow::Result<()> {
+    match sign_csr(state, domain.clone(), &csr).await {
+        Ok(cert_chain) => {
+            send_control(
+                send_stream,
+                &ControlMessage::CertResponse { domain, cert_chain },
+            )
+            .await?
+        }
+        Err(e) => {
+            send_control(
+                send_stream,
+                &ControlMessage::CertError {
+                    domain,
+                    error: e.to_string(),
+                },
+            )
+            .await?
+        }
+    }
     Ok(())
 }
