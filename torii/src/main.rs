@@ -41,7 +41,6 @@ use crate::cli::config::ToriiConfig;
 use crate::cli::socket;
 use crate::cli::socket::SocketMessage;
 use crate::cli::socket::send_socket_message;
-use crate::cli::socket::validate_ips;
 use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
 use crate::ebpf::ofuda::OfudaEntry;

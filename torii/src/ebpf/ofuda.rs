@@ -17,8 +17,8 @@ use crate::{
 };
 
 pub struct OfudaEntry {
-    pub add: Vec<String>,
-    pub remove: Vec<String>,
+    pub add: Vec<IpPrefix>,
+    pub remove: Vec<IpPrefix>,
     pub reply: tokio::sync::oneshot::Sender<Result<(), Vec<String>>>,
 }
 
@@ -86,59 +86,49 @@ pub async fn run(
         };
         let mut errors: Vec<String> = Vec::new();
         for ip in entry.remove {
-            if let Ok(prefix) = ip.parse::<IpPrefix>() {
-                match prefix {
-                    IpPrefix::V4(v4) => {
-                        delete_single!(ofuda_v4, v4, "BLOCKLIST_V4_PREFIX");
-                        ofuda_v4_entries.retain(|&ip| ip != v4);
-                    }
-                    IpPrefix::V6(v6) => {
-                        delete_single!(ofuda_v6, v6, "BLOCKLIST_V6_PREFIX");
-                        ofuda_v6_entries.retain(|&ip| ip != v6);
-                    }
+            match ip {
+                IpPrefix::V4(v4) => {
+                    delete_single!(ofuda_v4, v4, "BLOCKLIST_V4_PREFIX");
+                    ofuda_v4_entries.retain(|&ip| ip != v4);
                 }
-            } else {
-                errors.push(format!("Failed to parse: {ip}"));
+                IpPrefix::V6(v6) => {
+                    delete_single!(ofuda_v6, v6, "BLOCKLIST_V6_PREFIX");
+                    ofuda_v6_entries.retain(|&ip| ip != v6);
+                }
             }
         }
         let mut dropped_v4: u32 = 0;
         let mut dropped_v6: u32 = 0;
         for ip in entry.add {
-            if let Ok(prefix) = ip.parse::<IpPrefix>() {
-                match prefix {
-                    IpPrefix::V4(v4) => {
-                        let mut count = ofuda_v4_entries.len() as u32;
-                        insert_single!(
-                            ofuda_v4,
-                            count,
-                            125_000,
-                            v4,
-                            dropped_v4,
-                            "BLOCKLIST_V4_PREFIX"
-                        );
-                        if count > ofuda_v4_entries.len() as u32 && !ofuda_v4_entries.contains(&v4)
-                        {
-                            ofuda_v4_entries.push(v4);
-                        }
-                    }
-                    IpPrefix::V6(v6) => {
-                        let mut count = ofuda_v6_entries.len() as u32;
-                        insert_single!(
-                            ofuda_v6,
-                            count,
-                            125_000,
-                            v6,
-                            dropped_v6,
-                            "BLOCKLIST_V6_PREFIX"
-                        );
-                        if count > ofuda_v6_entries.len() as u32 && !ofuda_v6_entries.contains(&v6)
-                        {
-                            ofuda_v6_entries.push(v6);
-                        }
+            match ip {
+                IpPrefix::V4(v4) => {
+                    let mut count = ofuda_v4_entries.len() as u32;
+                    insert_single!(
+                        ofuda_v4,
+                        count,
+                        125_000,
+                        v4,
+                        dropped_v4,
+                        "BLOCKLIST_V4_PREFIX"
+                    );
+                    if count > ofuda_v4_entries.len() as u32 && !ofuda_v4_entries.contains(&v4) {
+                        ofuda_v4_entries.push(v4);
                     }
                 }
-            } else {
-                errors.push(format!("Failed to parse: {ip}"));
+                IpPrefix::V6(v6) => {
+                    let mut count = ofuda_v6_entries.len() as u32;
+                    insert_single!(
+                        ofuda_v6,
+                        count,
+                        125_000,
+                        v6,
+                        dropped_v6,
+                        "BLOCKLIST_V6_PREFIX"
+                    );
+                    if count > ofuda_v6_entries.len() as u32 && !ofuda_v6_entries.contains(&v6) {
+                        ofuda_v6_entries.push(v6);
+                    }
+                }
             }
         }
         if dropped_v4 > 0 {

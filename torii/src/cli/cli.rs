@@ -20,10 +20,10 @@ pub enum Commands {
 #[derive(clap::Args, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BansArgs {
     #[arg(short = 'a', long = "add", num_args = 1..)]
-    pub add: Vec<String>,
+    pub add: Vec<IpPrefix>,
     #[arg(short = 'r', long = "remove", num_args = 1..)]
-    pub remove: Vec<String>,
-    #[arg(short = 'l', long = "list", num_args = 0..=1, default_missing_value = "both")]
+    pub remove: Vec<IpPrefix>,
+    #[arg(short = 'l', long = "list", default_missing_value = "both")]
     pub list: Option<IpFilter>,
 }
 

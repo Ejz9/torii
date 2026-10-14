@@ -9,7 +9,7 @@ use std::{
 
 use aho_corasick::AhoCorasick;
 use axum::http;
-use keidai::{RouteConfig, SidecarConfig};
+use keidai::{CleanPath, Route, RouteConfig, ShinshiName, SidecarConfig};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -23,13 +23,13 @@ use crate::{
 #[serde(deny_unknown_fields)]
 pub struct ToriiConfig {
     #[serde(default)]
-    ddns_domain: Option<String>,
+    ddns_domain: Option<Route>,
     #[serde(default)]
     security: SecurityConfig,
     #[serde(default)]
-    routes: HashMap<String, RouteConfig>,
+    routes: HashMap<Route, RouteConfig>,
     #[serde(default)]
-    sidecars: HashMap<String, SidecarConfig>,
+    sidecars: HashMap<ShinshiName, SidecarConfig>,
 }
 
 impl Default for ToriiConfig {
@@ -44,7 +44,7 @@ impl Default for ToriiConfig {
 }
 
 pub struct ActiveState {
-    pub ddns_domain: Option<String>,
+    pub ddns_domain: Option<Route>,
     pub security: SecurityConfig,
     pub routes: matchit::Router<Arc<ActiveRoute>>,
     pub sidecar_routes: HashMap<String, String>,
@@ -87,21 +87,21 @@ impl ActiveState {
         let mut wildcard_certs = HashSet::new();
         let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
         let mut router = matchit::Router::new();
+        let gateway_routes: HashSet<Route> = config.routes.keys().cloned().collect();
         for (route, value) in config.routes.into_iter() {
-            let clean_route = route.trim_end_matches('/');
-            let domain = clean_route.parse::<DomainTier>()?;
+            let domain = route.parse::<DomainTier>()?;
             if value.tls_cert_path.is_none() && value.tls_key_path.is_none() {
                 match domain {
                     DomainTier::Root | DomainTier::Nested => {
-                        individual_certs.insert(clean_route.to_string());
+                        individual_certs.insert(route.to_string());
                     }
                     DomainTier::Subdomain => {
                         if value.individual_cert
                             || !config.security.default_certificate_mode_wildcard
                         {
-                            individual_certs.insert(clean_route.to_string());
+                            individual_certs.insert(route.to_string());
                         } else {
-                            if let Some((_, root)) = clean_route.split_once(".") {
+                            if let Some((_, root)) = route.split_once(".") {
                                 if !root.is_empty() {
                                     wildcard_certs.insert(root.to_string());
                                 }
@@ -111,14 +111,14 @@ impl ActiveState {
                 }
             } else {
                 let certificate =
-                    match validate_and_parse_custom_certificates(&value, clean_route, verifier) {
+                    match validate_and_parse_custom_certificates(&value, &route, verifier) {
                         Ok(certificate) => certificate,
                         Err(e) => {
                             error!("Failed to parse certificate for route: {}: {}", route, e);
                             continue;
                         }
                     };
-                valid_certificates.insert(clean_route.to_string(), certificate);
+                valid_certificates.insert(route.to_string(), certificate);
             }
             let active_route = Arc::new(value.try_into()?);
             let exact_pattern = format!("/{}", clean_route);
@@ -294,7 +294,7 @@ pub struct ActiveRoute {
     pub upstream_host_header: http::HeaderValue,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
-    pub allowed_asset_paths: Vec<String>,
+    pub allowed_asset_paths: Vec<CleanPath>,
     pub allowed_groups: Vec<String>,
 }
 
@@ -337,8 +337,7 @@ impl FromStr for DomainTier {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.split(".").count();
         match s.split(".").count() {
-            0 => Err(Error::InvalidDomain),
-            1 => Err(Error::InvalidDomain),
+            0 | 1 => Err(Error::InvalidDomain),
             2 => Ok(DomainTier::Root),
             3 => Ok(DomainTier::Subdomain),
             _ => Ok(DomainTier::Nested),

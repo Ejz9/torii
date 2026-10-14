@@ -99,7 +99,7 @@ pub async fn enforce_auth(
                     .route
                     .allowed_asset_paths
                     .iter()
-                    .any(|path| matched_route.catch_all.starts_with(path))
+                    .any(|path| matched_route.catch_all.starts_with(path.as_ref()))
             {
                 return Ok(next.run(req).await.into_response());
             }

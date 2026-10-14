@@ -100,12 +100,6 @@ pub async fn listener(
                 }
             },
             SocketMessage::UpdateBans(bans_args) => {
-                let invalid_add_entries = validate_ips(&bans_args.add);
-                let invalid_remove_entries = validate_ips(&bans_args.remove);
-                if invalid_add_entries || invalid_remove_entries {
-                    error!("Invalid addresses present");
-                    continue;
-                }
                 let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Vec<String>>>();
                 let entry: OfudaEntry = (bans_args, tx).into();
                 if let Err(e) = ofuda_tx.send(entry).await {
@@ -127,15 +121,17 @@ pub async fn listener(
                     }
                 }
             }
-            SocketMessage::ListBans(filter) => match get_ofuda_list(&filter, &kekkai_path).await {
-                Ok(bans) => {
-                    let strings: Vec<String> = bans.iter().map(|ip| ip.to_string()).collect();
-                    send_message(&mut stream, SocketResponse::ListBans(strings)).await
+            SocketMessage::ListBans(filter) => {
+                match get_ofuda_list(&filter, &state.config.kekkai_path).await {
+                    Ok(bans) => {
+                        let strings: Vec<String> = bans.iter().map(|ip| ip.to_string()).collect();
+                        send_message(&mut stream, SocketResponse::ListBans(strings)).await
+                    }
+                    Err(e) => {
+                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                    }
                 }
-                Err(e) => {
-                    send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                }
-            },
+            }
             SocketMessage::ReloadMihari => {
                 if let Some(mihari_notify) = &mihari_notify {
                     mihari_notify.notify_one();
