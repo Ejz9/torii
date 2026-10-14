@@ -28,6 +28,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use toml::from_str;
+use tracing::warn;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
@@ -54,6 +55,8 @@ use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -160,7 +163,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(endpoints) = &state.endpoints {
                 fetch_jwks(&endpoints, &state.jwks_cache).await?;
             }
-            let addr = format!("{}:{}", state.config.host, state.config.port);
             let private_routes = Router::new()
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
@@ -184,7 +186,14 @@ async fn main() -> anyhow::Result<()> {
             config.session_storage = ServerSessionMemoryCache::new(20_000);
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
-            let socket_addr: SocketAddr = addr.parse()?;
+            let socket_addr = match state.config.host {
+                IpAddr::V6(_) if TcpSocket::new_v6().is_err() => {
+                    warn!("IPv6 unsupported by kernel, falling back to 0.0.0.0");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), state.config.port)
+                }
+                host => SocketAddr::new(host, state.config.port),
+            };
+
             let nr_cpus = std::thread::available_parallelism()?.get();
             let mut servers = Vec::new();
             let handshake_limit = (nr_cpus * 128).clamp(256, 1024);
@@ -195,8 +204,8 @@ async fn main() -> anyhow::Result<()> {
                 let event_tx = event_tx.clone();
                 let network_token = network_token.clone();
                 let socket = match socket_addr {
-                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
                     SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
                 };
                 socket.set_reuseaddr(true)?;
                 socket.set_reuseport(true)?;
@@ -223,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
                     state.sidecars.clone(),
                 )));
             }
-            info!("Listening on {} across {} listeners...", addr, nr_cpus);
+            info!("Listening on {socket_addr} across {nr_cpus} listeners...");
 
             select! {
                 _ = tokio::signal::ctrl_c() => {}
@@ -276,11 +285,6 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .context("FATAL: Daemon failed to retrieve ban list")?;
             } else {
-                let invalid_add_entries = validate_ips(&bans_args.add);
-                let invalid_remove_entries = validate_ips(&bans_args.remove);
-                if invalid_add_entries || invalid_remove_entries {
-                    std::process::exit(1);
-                }
                 send_socket_message(SocketMessage::UpdateBans(bans_args))
                     .await
                     .context("FATAL: Daemon rejected ban modifications")?;

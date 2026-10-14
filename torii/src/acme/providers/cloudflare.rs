@@ -78,17 +78,18 @@ impl DdnsProvider for CloudflareProvider {
         ip: &str,
         cached_id: Option<&str>,
     ) -> Result<String, Error> {
+        let record_type = if ip.contains(':') { "AAAA" } else { "A" };
         if let Some(record_id) = cached_id {
-            self.update_a_record(&record_id, ip).await?;
+            self.update_dns_record(&record_id, ip).await?;
             return Ok(record_id.to_string());
         };
-        match self.fetch_a_record(domain).await? {
+        match self.fetch_dns_record(domain, record_type).await? {
             Some(record_id) => {
-                self.update_a_record(&record_id, ip).await?;
+                self.update_dns_record(&record_id, ip).await?;
                 Ok(record_id)
             }
             None => {
-                let new_id = self.create_a_record(domain, ip).await?;
+                let new_id = self.create_dns_record(domain, ip, record_type).await?;
                 Ok(new_id)
             }
         }
@@ -105,8 +106,16 @@ impl CloudflareProvider {
     fn record_url(&self, record_id: &str) -> String {
         format!("{}/dns_records/{}", self.zone_url(), record_id)
     }
-    async fn fetch_a_record(&self, domain: &str) -> Result<Option<String>, crate::error::Error> {
-        let url = format!("{}/dns_records?type=A&name={}", self.zone_url(), domain);
+    async fn fetch_dns_record(
+        &self,
+        domain: &str,
+        record_type: &str,
+    ) -> Result<Option<String>, crate::error::Error> {
+        let url = format!(
+            "{}/dns_records?type={record_type}&name={}",
+            self.zone_url(),
+            domain
+        );
         let response = reqwest::Client::new()
             .get(url)
             .bearer_auth(&self.api_token)
@@ -116,12 +125,17 @@ impl CloudflareProvider {
         let response: CloudflareListResponse = response.json().await?;
         Ok(response.result.into_iter().next().map(|r| r.id))
     }
-    async fn create_a_record(&self, domain: &str, ip: &str) -> Result<String, crate::error::Error> {
+    async fn create_dns_record(
+        &self,
+        domain: &str,
+        ip: &str,
+        record_type: &str,
+    ) -> Result<String, crate::error::Error> {
         let url = format!("{}/dns_records", self.zone_url());
         let record = CloudflareRecord {
             name: domain.to_string(),
             ttl: 120,
-            r#type: "A".to_string(),
+            r#type: record_type.to_string(),
             comment: "Torii DDNS".to_string(),
             content: ip.to_string(),
             private_routing: false,
@@ -137,7 +151,7 @@ impl CloudflareProvider {
         let response: CloudflareResponse = response.json().await?;
         Ok(response.result.id)
     }
-    async fn update_a_record(
+    async fn update_dns_record(
         &self,
         record_id: &str,
         ip: &str,

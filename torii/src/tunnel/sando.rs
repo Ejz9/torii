@@ -66,7 +66,7 @@ pub async fn listener(
     let transport_config =
         Arc::get_mut(&mut server_config.transport).expect("transport config should be unique");
     transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
-    let addr = SocketAddr::new(IpAddr::V4(state.config.host), state.config.quic_event_port);
+    let addr = SocketAddr::new(state.config.host, state.config.quic_event_port);
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     info!("Listening for QUIC tunnels on {addr}...");
     loop {
