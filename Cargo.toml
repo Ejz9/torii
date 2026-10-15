@@ -29,6 +29,7 @@ quinn = { version = "0.11.11", default-features = false, features = [
     "aws-lc-rs",
     "rustls-aws-lc-rs",
 ] }
+hex = "0.4.3"
 
 [profile.release]
 lto = true

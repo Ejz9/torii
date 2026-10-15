@@ -1,3 +1,5 @@
+use keidai::TunnelEndpoint;
+
 use crate::acme::providers::ProviderKind;
 use crate::acme::providers::cloudflare::CloudflareProvider;
 use crate::auth::oidc::OidcProvider;
@@ -25,6 +27,7 @@ pub struct Config {
     pub ebpf_metrics: bool,
     pub sando_path: String,
     pub biscuit_path: String,
+    pub sando_endpoint: Option<TunnelEndpoint>,
 }
 
 impl Config {
@@ -112,6 +115,11 @@ impl Config {
         let ebpf_metrics = var("EBPF_METRICS")
             .map(|v| v.parse::<bool>().unwrap_or(true))
             .unwrap_or(false);
+        let sando_endpoint = var("SANDO_ENDPOINT")
+            .ok()
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| Error::Env(format!("Invalid SANDO_ENDPOINT: {e}")))?;
         Ok(Config {
             interface,
             port,
@@ -130,6 +138,7 @@ impl Config {
             ebpf_metrics,
             sando_path,
             biscuit_path,
+            sando_endpoint,
         })
     }
 }

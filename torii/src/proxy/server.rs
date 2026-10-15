@@ -1,19 +1,19 @@
 use arc_swap::ArcSwap;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
-use keidai::ConnectionEvent;
+use keidai::{ConnectionEvent, ShinshiName};
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{
-    net::TcpListener,
-};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, error};
+
+use crate::{cli::config::ActiveState, proxy::sni::extract_sni};
 
 #[derive(Debug)]
 pub struct CertificateResolver {
@@ -80,8 +80,48 @@ pub async fn serve(
         let tls_acceptor = acceptor.clone();
         let app = routes.clone();
         let tx = event_tx.clone();
+        let config = Arc::clone(&dynamic_config);
+        let tunnels = Arc::clone(&sidecars);
 
-        tokio::task::spawn(async move {
+        tokio::spawn(async move {
+            let mut peek_buf = [0u8; 1024];
+            let ch_bytes = match tcp_stream.peek(&mut peek_buf).await {
+                Ok(ch_bytes) => ch_bytes,
+                Err(_) => {
+                    drop(permit);
+                    return;
+                }
+            };
+            if let Some(domain) = extract_sni(&peek_buf[..ch_bytes]) {
+                let active = config.load();
+                if let Some(sidecar_id) = active.sidecar_routes.get(domain) {
+                    drop(permit);
+                    let sidecar_conn = tunnels.load().get(sidecar_id).cloned();
+                    if let Some(conn) = sidecar_conn {
+                        let Ok((mut quic_send, mut quic_recv)) = conn.open_bi().await else {
+                            let _ = tx.try_send(ConnectionEvent::new(
+                                0,
+                                502,
+                                "",
+                                remote_addr.ip(),
+                                "QUIC",
+                            ));
+                            return;
+                        };
+                        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+                        let _ = tokio::join!(
+                            tokio::io::copy(&mut tcp_read, &mut quic_send),
+                            tokio::io::copy(&mut quic_recv, &mut tcp_write)
+                        );
+                        return;
+                    } else {
+                        debug!("Sidecar '{sidecar_id}' for '{domain}' is offline");
+                        let _ =
+                            tx.try_send(ConnectionEvent::new(0, 503, "", remote_addr.ip(), "TCP"));
+                        return;
+                    }
+                }
+            }
             let stream =
                 match tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
                     .await

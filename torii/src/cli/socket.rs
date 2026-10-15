@@ -1,6 +1,6 @@
-use arc_swap::ArcSwap;
-use keidai::{ControlMessage, SidecarConfig, send_control};
-use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
+use biscuit_auth::macros::biscuit;
+use keidai::SidecarInit;
+use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -15,20 +15,17 @@ use tracing::{error, info};
 
 use crate::{
     cli::{
-        cli::{BansArgs, IpFilter},
+        cli::{BansArgs, IpFilter, TunnelArgs},
         config::{ActiveState, ToriiConfig},
     },
-    ebpf::{
-        kekkai_manager::IpPrefix,
-        ofuda::{OfudaEntry, get_ofuda_list},
-    },
+    ebpf::ofuda::{OfudaEntry, get_ofuda_list},
     error::Error,
+    state::AppState,
 };
 
 pub async fn listener(
-    dynamic_config: Arc<ArcSwap<ActiveState>>,
+    state: Arc<AppState>,
     config_reload_tx: tokio::sync::broadcast::Sender<()>,
-    cert_verifier: Arc<WebPkiServerVerifier>,
     acme_tx: Option<
         tokio::sync::mpsc::Sender<(
             HashSet<String>,
@@ -38,7 +35,6 @@ pub async fn listener(
     >,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
-    kekkai_path: String,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     std::fs::remove_file("/tmp/torii.sock").ok();
@@ -78,27 +74,29 @@ pub async fn listener(
         };
         let _ = stream.write_u8(1).await;
         match data {
-            SocketMessage::ReloadConfig(data) => match ActiveState::build(data, &cert_verifier) {
-                Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
-                    dynamic_config.store(Arc::new(config));
-                    let _ = config_reload_tx.send(());
-                    if let Some(acme_tx) = &acme_tx {
-                        let _ = acme_tx
-                            .send((individual_certs, wildcard_certs, custom_certs))
-                            .await;
-                    } else {
-                        send_message(
-                            &mut stream,
-                            SocketResponse::FatalError("ACME provider disabled".to_string()),
-                        )
-                        .await
+            SocketMessage::ReloadConfig(data) => {
+                match ActiveState::build(data, &state.cert_verifier) {
+                    Ok((config, individual_certs, wildcard_certs, custom_certs)) => {
+                        state.dynamic_config.store(Arc::new(config));
+                        let _ = config_reload_tx.send(());
+                        if let Some(acme_tx) = &acme_tx {
+                            let _ = acme_tx
+                                .send((individual_certs, wildcard_certs, custom_certs))
+                                .await;
+                        } else {
+                            send_message(
+                                &mut stream,
+                                SocketResponse::FatalError("ACME provider disabled".to_string()),
+                            )
+                            .await
+                        }
+                        send_message(&mut stream, SocketResponse::Success).await
                     }
-                    send_message(&mut stream, SocketResponse::Success).await
+                    Err(e) => {
+                        send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
+                    }
                 }
-                Err(e) => {
-                    send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
-                }
-            },
+            }
             SocketMessage::UpdateBans(bans_args) => {
                 let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Vec<String>>>();
                 let entry: OfudaEntry = (bans_args, tx).into();
@@ -138,6 +136,67 @@ pub async fn listener(
                     send_message(&mut stream, SocketResponse::Success).await;
                 }
             }
+            SocketMessage::TunnelInit(args) => {
+                let active = state.dynamic_config.load();
+                let sidecar_id = args.name.unwrap_or_else(|| {
+                    uuid::Uuid::new_v4()
+                        .to_string()
+                        .parse()
+                        .expect("UUID is a valid ShinshiName")
+                });
+                if active.sidecars.contains_key(&sidecar_id) {
+                    send_message(
+                        &mut stream,
+                        SocketResponse::FatalError(format!("'{sidecar_id}' already exists")),
+                    )
+                    .await;
+                    continue;
+                }
+                let mut errors = Vec::new();
+                for route in &args.routes {
+                    if let Some(sidecar) = active.sidecar_routes.get(route) {
+                        errors.push(format!("'{route}' is already registered to {sidecar}",));
+                    }
+                    if active.routes.at(&format!("/{route}")).is_ok() {
+                        errors.push(format!(
+                            "'{route}' is already configured as a gateway route"
+                        ));
+                    }
+                }
+
+                if !errors.is_empty() {
+                    send_message(
+                        &mut stream,
+                        SocketResponse::FatalError(format!(
+                            "Route collisions detected:\n - {}",
+                            errors.join("\n -")
+                        )),
+                    )
+                    .await;
+                    continue;
+                }
+
+                let builder = biscuit!(
+                    r#"
+                    sidecar({id});
+                    "#,
+                    id = sidecar_id.to_string()
+                );
+                let Some(server) = args.server.or_else(|| state.config.sando_endpoint.clone())
+                else {
+                    send_message(&mut stream, SocketResponse::FatalError("Server endpoint required: specify with --server <host:port> or set SANDO_ENDPOINT in .env".to_string())).await;
+                    continue;
+                };
+                let token = builder.build(&state.root_keypair)?.to_base64()?;
+                let init = SidecarInit {
+                    id: sidecar_id,
+                    token,
+                    fingerprint: state.tunnel_fingerprint.clone(),
+                    server: server,
+                };
+                let command = format!("shinshi start --token {}", init.to_token()?);
+                send_message(&mut stream, SocketResponse::TunnelCommand(command)).await
+            }
         }
     }
     Ok(())
@@ -149,6 +208,7 @@ pub enum SocketMessage {
     UpdateBans(BansArgs),
     ListBans(IpFilter),
     ReloadMihari,
+    TunnelInit(TunnelArgs),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -157,6 +217,7 @@ pub enum SocketResponse {
     PartialSuccess(Vec<String>),
     FatalError(String),
     ListBans(Vec<String>),
+    TunnelCommand(String),
 }
 
 pub async fn send_socket_message(message: SocketMessage) -> Result<(), Error> {
@@ -207,23 +268,13 @@ pub async fn send_socket_message(message: SocketMessage) -> Result<(), Error> {
                 Ok(println!("Active Bans:\n - {}", bans.join("\n - ")))
             }
         }
+        SocketResponse::TunnelCommand(command) => Ok(println!(
+            "Sidecar init generated successfully!\nRun on your backend host:\n\n {command}"
+        )),
         SocketResponse::FatalError(err) => {
             Err(Error::InvalidCustomSetup(format!("Daemon Error: {err}")))
         }
     }
-}
-
-pub fn validate_ips(list: &Vec<String>) -> bool {
-    let mut error = false;
-    for ip in list {
-        if ip.parse::<IpPrefix>().is_err() {
-            eprintln!("FATAL: Invalid IP Address {ip}");
-            if !error {
-                error = true;
-            }
-        }
-    }
-    error
 }
 
 async fn send_message(stream: &mut UnixStream, message: SocketResponse) {

@@ -1,19 +1,20 @@
-use std::{
-    fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
-
 use aws_lc_rs::digest;
 use biscuit_auth::{Biscuit, macros::authorizer};
-use keidai::{ConnectionEvent, ControlMessage, SidecarConfig, recv_control, send_control};
+use keidai::{
+    ConnectionEvent, ControlMessage, ShinshiName, SidecarConfig, recv_control, send_control,
+};
 use log::warn;
 use quinn::crypto::rustls::QuicServerConfig;
 use rcgen::generate_simple_self_signed;
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
+};
+use std::{
+    fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +25,7 @@ use crate::{acme::dns::sign_csr, error::Error, state::AppState};
 
 pub fn load_or_generate_tunnel_cert(
     sando_path: &str,
-) -> Result<(rustls::ServerConfig, [u8; 32]), Error> {
+) -> Result<(rustls::ServerConfig, String), Error> {
     let cert_path = format!("{sando_path}tunnel_cert.der");
     let key_path = format!("{sando_path}tunnel_key.der");
 
@@ -44,8 +45,7 @@ pub fn load_or_generate_tunnel_cert(
         }
     };
     let digest = digest::digest(&digest::SHA256, &cert_bytes);
-    let mut fingerprint = [0u8; 32];
-    fingerprint.copy_from_slice(digest.as_ref());
+    let fingerprint = hex::encode(digest);
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -60,8 +60,7 @@ pub async fn listener(
     cancellation_token: CancellationToken,
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let (rustls_config, fingerprint_) = load_or_generate_tunnel_cert(&state.config.sando_path)?;
-    let quic_crypto = QuicServerConfig::try_from(rustls_config)?;
+    let quic_crypto = QuicServerConfig::try_from(state.tunnel_config.clone())?;
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
     let transport_config =
         Arc::get_mut(&mut server_config.transport).expect("transport config should be unique");
@@ -141,9 +140,10 @@ async fn handle_sidecar(
         .into_iter()
         .next()
         .ok_or_else(|| anyhow::anyhow!("Token missing sidecar fact"))?;
+    let id: ShinshiName = id.parse()?;
 
     let active = state.dynamic_config.load();
-    let Some(sidecar_cfg) = active.sidecars.get(&id) else {
+    let Some(sidecar_cfg) = active.sidecars.get(id.as_str()) else {
         warn!("Sidecar '{id}' authenticated, but has no routes configured");
         connection.close(404_u32.into(), b"no routes configured");
         anyhow::bail!("No configuration found for sidecar '{id}'");
@@ -159,7 +159,7 @@ async fn handle_sidecar(
         match tokio::time::timeout(Duration::from_secs(120), recv_control(&mut recv_stream)).await {
             Ok(Ok(ControlMessage::Ready)) => break,
             Ok(Ok(ControlMessage::CertRequest { domain, csr })) => {
-                handle_cert_request(&state, &id, &mut send_stream, domain, csr).await?
+                handle_cert_request(&state, &mut send_stream, domain, csr).await?
             }
             _ => anyhow::bail!("Unexpected control message from sidecar '{id}'"),
         }
@@ -183,7 +183,7 @@ async fn handle_sidecar(
             }
             Ok(()) = reload_rx.recv() => {
                 let dynamic_config = state.dynamic_config.load();
-                if let Some(config) = dynamic_config.sidecars.get(&id) {
+                if let Some(config) = dynamic_config.sidecars.get(id.as_str()) {
                     let msg = ControlMessage::SyncConfig(SidecarConfig {
                         routes: config.routes.clone(),
                         forbidden_paths: dynamic_config.security.forbidden_paths.clone(),
@@ -197,7 +197,7 @@ async fn handle_sidecar(
             req = recv_control(&mut recv_stream) => {
                 match req {
                     Ok(ControlMessage::CertRequest { domain, csr }) => {
-                        handle_cert_request(&state, &id, &mut send_stream, domain, csr).await?;
+                        handle_cert_request(&state, &mut send_stream, domain, csr).await?;
                     }
                     _ => break,
                 }
@@ -223,7 +223,6 @@ async fn handle_sidecar(
 
 async fn handle_cert_request(
     state: &AppState,
-    id: &str,
     send_stream: &mut quinn::SendStream,
     domain: String,
     csr: Vec<u8>,

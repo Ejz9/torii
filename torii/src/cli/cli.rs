@@ -1,3 +1,7 @@
+use keidai::{Route, ShinshiName, TunnelEndpoint};
+
+use crate::ebpf::kekkai_manager::IpPrefix;
+
 #[derive(clap::Parser)]
 #[clap(author, version, about, long_about = None)]
 pub struct Cli {
@@ -15,6 +19,7 @@ pub enum Commands {
     #[command(arg_required_else_help = true)]
     Bans(BansArgs),
     ReloadThreats,
+    Tunnel(TunnelArgs),
 }
 
 #[derive(clap::Args, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,4 +38,14 @@ pub enum IpFilter {
     V4,
     V6,
     Both,
+}
+
+#[derive(clap::Args, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TunnelArgs {
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<ShinshiName>,
+    #[arg(short = 'r', long = "routes", num_args = 1..)]
+    pub routes: Vec<Route>,
+    #[arg(short = 's', long = "server")]
+    pub server: Option<TunnelEndpoint>,
 }

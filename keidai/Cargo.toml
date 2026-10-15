@@ -16,3 +16,4 @@ quinn = { workspace = true }
 serde = "1.0.229"
 tokio = { workspace = true }
 zerocopy = { workspace = true }
+hex = { workspace = true }

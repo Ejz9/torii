@@ -47,8 +47,8 @@ pub struct ActiveState {
     pub ddns_domain: Option<Route>,
     pub security: SecurityConfig,
     pub routes: matchit::Router<Arc<ActiveRoute>>,
-    pub sidecar_routes: HashMap<String, String>,
-    pub sidecars: HashMap<String, SidecarConfig>,
+    pub sidecar_routes: HashMap<Route, ShinshiName>,
+    pub sidecars: HashMap<ShinshiName, SidecarConfig>,
 }
 
 #[derive(Clone)]
@@ -120,19 +120,50 @@ impl ActiveState {
                     };
                 valid_certificates.insert(route.to_string(), certificate);
             }
+            let aliases = value.aliases.clone();
+            let individual_cert = value.individual_cert;
             let active_route = Arc::new(value.try_into()?);
-            let exact_pattern = format!("/{}", clean_route);
+            let exact_pattern = format!("/{route}");
             router.insert(exact_pattern, Arc::clone(&active_route))?;
 
-            let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
-            router.insert(catch_all_pattern, active_route)?;
+            let catch_all_pattern = format!("/{route}/{{*catch_all}}");
+            router.insert(catch_all_pattern, Arc::clone(&active_route))?;
+
+            if !aliases.is_empty() {
+                for alias in aliases {
+                    if individual_cert || !config.security.default_certificate_mode_wildcard {
+                        individual_certs.insert(alias.to_string());
+                    } else {
+                        if let Some((_, root)) = alias.split_once(".") {
+                            if !root.is_empty() {
+                                wildcard_certs.insert(root.to_string());
+                            }
+                        }
+                    }
+                    router.insert(format!("/{alias}"), Arc::clone(&active_route))?;
+                    router.insert(
+                        format!("/{alias}/{{*catch_all}}"),
+                        Arc::clone(&active_route),
+                    )?;
+                }
+            }
         }
 
         let mut sidecar_routes = HashMap::new();
         for (sidecar_id, sidecar_cfg) in &config.sidecars {
             for route in sidecar_cfg.routes.keys() {
-                let clean_route = route.trim_end_matches('/');
-                sidecar_routes.insert(clean_route.to_string(), sidecar_id.clone());
+                if gateway_routes.contains(route) {
+                    return Err(Error::InvalidCustomSetup(format!(
+                        "Route collision: '{route}' is configured as both a gateway and sidecar route"
+                    )));
+                }
+                if let Some(existing_sidecar) =
+                    sidecar_routes.insert(route.clone(), sidecar_id.clone())
+                {
+                    return Err(Error::InvalidCustomSetup(format!(
+                        "Route collision: '{route}' is claimed by '{existing_sidecar}' and '{sidecar_id}'"
+                    )));
+                }
             }
         }
 

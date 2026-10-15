@@ -161,6 +161,8 @@ pub struct RouteConfig {
     pub allowed_asset_paths: Vec<CleanPath>,
     #[serde(default)]
     pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<Route>,
 }
 
 fn default_max_connections() -> usize {

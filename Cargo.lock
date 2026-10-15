@@ -1786,6 +1786,7 @@ name = "keidai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "postcard",
  "quinn",
  "serde",
@@ -3417,6 +3418,7 @@ dependencies = [
  "env_logger",
  "flume",
  "governor",
+ "hex",
  "hyper",
  "hyper-rustls",
  "hyper-util",

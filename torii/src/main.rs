@@ -132,13 +132,11 @@ async fn main() -> anyhow::Result<()> {
                 worker_token.clone(),
             ));
             worker_set.spawn(socket::listener(
-                Arc::clone(&state.dynamic_config),
+                state.clone(),
                 config_reload_tx,
-                Arc::clone(&state.cert_verifier),
                 acme_tx,
                 ofuda_tx,
                 mihari_notify.clone(),
-                state.config.kekkai_path.clone(),
                 worker_token.clone(),
             ));
             if let (Some(acme_provider), Some(acme_rx)) =
@@ -295,6 +293,11 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("FATAL: Daemon failed to communicate with mihari worker thread")?;
             println!("Mhiari threat worker refreshed");
+        }
+        Commands::Tunnel(tunnel_args) => {
+            send_socket_message(SocketMessage::TunnelInit(tunnel_args))
+                .await
+                .context("FATAL: Daemon rejected tunnel parameters")?;
         }
     }
     std::process::exit(0);

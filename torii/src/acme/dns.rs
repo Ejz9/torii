@@ -64,6 +64,7 @@ pub async fn acme_worker(
     Ok(())
 }
 
+/// ACME based on RFC 8555
 async fn refresh_certificates(
     state: &AppState,
     acme_provider: &ProviderKind,
