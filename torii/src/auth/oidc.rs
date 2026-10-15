@@ -35,6 +35,10 @@ pub struct Endpoints {
     pub grant_types_supported: Option<Vec<String>>,
 }
 
+/// OIDC based on RFC 6749
+/// JWKS based on RFC 7519 and RFC 7517
+/// Biscuit based on https://www.biscuitsec.org/
+/// Session Cookie based on RFC 6265
 impl Endpoints {
     pub async fn discover_endpoints(issuer_url: &str) -> Result<Self, Error> {
         info!("Fetching OIDC endpoints...");

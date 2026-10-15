@@ -19,7 +19,7 @@ use crate::{
     error::Error,
 };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ToriiConfig {
     #[serde(default)]
@@ -268,7 +268,7 @@ fn validate_and_parse_custom_certificates(
     Ok(parse_certificate(key_bytes, cert_bytes)?)
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecurityConfig {
     #[serde(default = "default_certificate_mode_wildcard")]
     default_certificate_mode_wildcard: bool,
@@ -326,7 +326,7 @@ pub struct ActiveRoute {
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
     pub allowed_asset_paths: Vec<CleanPath>,
-    pub allowed_groups: Vec<String>,
+    pub allowed_groups_datalog_policy: String,
 }
 
 impl TryFrom<RouteConfig> for ActiveRoute {
@@ -343,6 +343,16 @@ impl TryFrom<RouteConfig> for ActiveRoute {
         let upstream_limiter = Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_connections,
         ));
+        let allowed_groups_datalog_policy = if config.allowed_groups.is_empty() {
+            "allow if true;".to_string()
+        } else {
+            config
+                .allowed_groups
+                .iter()
+                .map(|g| format!("allow if group(\"{g}\");"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         Ok(ActiveRoute {
             upstream,
             upstream_limiter,
@@ -352,7 +362,7 @@ impl TryFrom<RouteConfig> for ActiveRoute {
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
             allowed_asset_paths: config.allowed_asset_paths,
-            allowed_groups: config.allowed_groups,
+            allowed_groups_datalog_policy,
         })
     }
 }
@@ -421,5 +431,55 @@ impl AsRef<str> for SmallPath {
     #[inline]
     fn as_ref(&self) -> &str {
         self.deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_minimal_config() {
+        let toml_str = r#"
+            [security]
+            default_certificate_mode_wildcard = false
+            ebpf_strike_threshold = 10
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(res.is_ok(), "Expected valid TOML to parse successfully");
+    }
+
+    #[test]
+    fn test_deny_unkown_fields_at_root() {
+        let toml_str = r#"
+            unknown_root_key = "should_fail"
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(res.is_err(), "Expected unknown field to trigger an error");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("unknown field `unknown_root_key`"));
+    }
+
+    #[test]
+    fn test_sidecar_config_parsing() {
+        let toml_str = r#"
+            [sidecars.my_sidecar]
+            forbidden_paths = ["admin", "private"]
+
+            [sidecars.my_sidecar.routes."app.example.com"]
+            upstream = "http://127.0.0.1:8080"
+            public_bypass = true
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(
+            res.is_ok(),
+            "Failed to parse valid sidecar config: {:?}",
+            res.err()
+        );
+        let config = res.unwrap();
+        let sidecar_name = "my_sidecar".parse::<ShinshiName>().unwrap();
+        assert!(config.sidecars.contains_key(&sidecar_name));
+        let sidecar = &config.sidecars[&sidecar_name];
+        assert_eq!(sidecar.forbidden_paths, vec!["admin", "private"]);
     }
 }

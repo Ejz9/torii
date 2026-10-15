@@ -65,7 +65,11 @@ pub async fn listener(
     let transport_config =
         Arc::get_mut(&mut server_config.transport).expect("transport config should be unique");
     transport_config.keep_alive_interval(Some(Duration::from_secs(10)));
-    let addr = SocketAddr::new(state.config.host, state.config.quic_event_port);
+    let mut addr = SocketAddr::new(state.config.host, state.config.quic_event_port);
+    if addr.is_ipv6() && std::net::UdpSocket::bind(addr).is_err() {
+        warn!("IPv6 UDP unsupported by kernel, falling back to 0.0.0.0");
+        addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), state.config.quic_event_port);
+    }
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     info!("Listening for QUIC tunnels on {addr}...");
     loop {

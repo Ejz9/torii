@@ -52,8 +52,11 @@ pub async fn serve(
     acceptor: TlsAcceptor,
     event_tx: flume::Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
+    handshake_limit: usize,
+    dynamic_config: Arc<ArcSwap<ActiveState>>,
+    sidecars: Arc<ArcSwap<HashMap<ShinshiName, quinn::Connection>>>,
 ) -> anyhow::Result<()> {
-    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(64));
+    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(handshake_limit));
     loop {
         let permit = tokio::select! {
             biased;

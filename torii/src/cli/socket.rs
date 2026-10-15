@@ -18,7 +18,10 @@ use crate::{
         cli::{BansArgs, IpFilter, TunnelArgs},
         config::{ActiveState, ToriiConfig},
     },
-    ebpf::ofuda::{OfudaEntry, get_ofuda_list},
+    ebpf::{
+        kekkai_manager::IpPrefix,
+        ofuda::{OfudaEntry, get_ofuda_list},
+    },
     error::Error,
     state::AppState,
 };
@@ -121,10 +124,7 @@ pub async fn listener(
             }
             SocketMessage::ListBans(filter) => {
                 match get_ofuda_list(&filter, &state.config.kekkai_path).await {
-                    Ok(bans) => {
-                        let strings: Vec<String> = bans.iter().map(|ip| ip.to_string()).collect();
-                        send_message(&mut stream, SocketResponse::ListBans(strings)).await
-                    }
+                    Ok(bans) => send_message(&mut stream, SocketResponse::ListBans(bans)).await,
                     Err(e) => {
                         send_message(&mut stream, SocketResponse::FatalError(e.to_string())).await
                     }
@@ -216,7 +216,7 @@ pub enum SocketResponse {
     Success,
     PartialSuccess(Vec<String>),
     FatalError(String),
-    ListBans(Vec<String>),
+    ListBans(Vec<IpPrefix>),
     TunnelCommand(String),
 }
 
@@ -263,10 +263,14 @@ pub async fn send_socket_message(message: SocketMessage) -> Result<(), Error> {
         ))),
         SocketResponse::ListBans(bans) => {
             if bans.is_empty() {
-                Ok(println!("There are no active bans"))
+                println!("There are no active bans");
             } else {
-                Ok(println!("Active Bans:\n - {}", bans.join("\n - ")))
+                println!("Active Bans:");
+                for ban in &bans {
+                    println!("- {ban}");
+                }
             }
+            Ok(())
         }
         SocketResponse::TunnelCommand(command) => Ok(println!(
             "Sidecar init generated successfully!\nRun on your backend host:\n\n {command}"

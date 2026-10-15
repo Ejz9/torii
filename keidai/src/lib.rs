@@ -83,7 +83,7 @@ pub enum ControlMessage {
 }
 
 /// Route validator based on RFC 1035, RFC 1123 and RFC 2181
-#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct Route(String);
 
 impl FromStr for Route {
@@ -142,7 +142,7 @@ impl Borrow<str> for Route {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RouteConfig {
     pub upstream: String,
     #[serde(default = "default_max_connections")]
@@ -169,7 +169,7 @@ fn default_max_connections() -> usize {
     256
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SidecarConfig {
     #[serde(default)]
     pub routes: HashMap<Route, RouteConfig>,
@@ -194,7 +194,7 @@ pub async fn recv_control(stream: &mut quinn::RecvStream) -> anyhow::Result<Cont
     Ok(postcard::from_bytes(&buf)?)
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(from = "String", into = "String")]
 pub struct CleanPath(String);
 
@@ -220,7 +220,7 @@ impl AsRef<str> for CleanPath {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Eq, PartialEq, Hash, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
 pub struct ShinshiName(String);
 
 impl FromStr for ShinshiName {
@@ -303,4 +303,28 @@ impl Display for TunnelEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.host, self.port)
     }
+}
+
+#[test]
+fn test_route_validation() {
+    assert!("example.com".parse::<Route>().is_ok());
+    assert!("api.sub.example.com".parse::<Route>().is_ok());
+    assert!("service-1.internal.net".parse::<Route>().is_ok());
+    assert!("*.example.com".parse::<Route>().is_err());
+    assert!("example.com/api".parse::<Route>().is_err());
+    assert!("localhost".parse::<Route>().is_err());
+    assert!("-bad.com".parse::<Route>().is_err());
+    assert!("".parse::<Route>().is_err());
+}
+
+#[test]
+fn test_shinshi_name_validation() {
+    assert!("auth_service".parse::<ShinshiName>().is_ok());
+    assert!("backend-1".parse::<ShinshiName>().is_ok());
+    assert!("edge01".parse::<ShinshiName>().is_ok());
+    assert!("a".parse::<ShinshiName>().is_ok());
+    assert!("".parse::<ShinshiName>().is_err());
+    assert!("-bad".parse::<ShinshiName>().is_err());
+    assert!("bad name!".parse::<ShinshiName>().is_err());
+    
 }
