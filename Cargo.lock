@@ -1850,7 +1850,7 @@ name = "keidai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "hex",
+ "base64 0.23.1",
  "postcard",
  "quinn",
  "serde",
@@ -3476,6 +3476,7 @@ dependencies = [
  "aya",
  "aya-build",
  "aya-log",
+ "base64 0.23.1",
  "biscuit-auth",
  "cargo_metadata",
  "clap",
@@ -3485,7 +3486,6 @@ dependencies = [
  "governor",
  "h3",
  "h3-quinn",
- "hex",
  "hyper",
  "hyper-rustls",
  "hyper-util",

@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::bail;
+use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -264,19 +265,19 @@ impl ShinshiName {
 #[derive(Serialize, Deserialize)]
 pub struct SidecarInit {
     pub id: ShinshiName,
-    pub token: String,
-    pub fingerprint: String,
+    pub token: Vec<u8>,
+    pub fingerprint: [u8; 32],
     pub server: TunnelEndpoint,
 }
 
 impl SidecarInit {
     pub fn to_token(&self) -> anyhow::Result<String> {
         let bytes = postcard::to_allocvec(self)?;
-        Ok(hex::encode(bytes))
+        Ok(BASE64_URL_SAFE_NO_PAD.encode(bytes))
     }
 
     pub fn from_token(s: &str) -> anyhow::Result<Self> {
-        let bytes = hex::decode(s)?;
+        let bytes = BASE64_URL_SAFE_NO_PAD.decode(s)?;
         Ok(postcard::from_bytes(&bytes)?)
     }
 }
@@ -326,5 +327,4 @@ fn test_shinshi_name_validation() {
     assert!("".parse::<ShinshiName>().is_err());
     assert!("-bad".parse::<ShinshiName>().is_err());
     assert!("bad name!".parse::<ShinshiName>().is_err());
-    
 }

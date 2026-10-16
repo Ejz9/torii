@@ -42,7 +42,7 @@ pub struct AppState {
     pub event_tx: flume::Sender<ConnectionEvent>,
     pub root_keypair: biscuit_auth::KeyPair,
     pub tunnel_config: ServerConfig,
-    pub tunnel_fingerprint: String,
+    pub tunnel_fingerprint: [u8; 32],
     pub config_reload_tx: tokio::sync::broadcast::Sender<()>,
 }
 

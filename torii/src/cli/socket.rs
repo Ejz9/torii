@@ -86,10 +86,14 @@ pub async fn listener(
                             let _ = acme_tx
                                 .send((individual_certs, wildcard_certs, custom_certs))
                                 .await;
-                        } else {
+                        } else if !custom_certs.is_empty() {
+                            let mut active_map = (**state.certificates.load()).clone();
+                            active_map.extend(custom_certs);
+                            state.certificates.store(Arc::new(active_map));
+                        } else if !individual_certs.is_empty() || !wildcard_certs.is_empty() {
                             send_message(
                                 &mut stream,
-                                SocketResponse::FatalError("ACME provider disabled".to_string()),
+                                SocketResponse::FatalError("Routes require ACME certificates, but ACME provider is disabled".to_string()),
                             )
                             .await
                         }
@@ -163,7 +167,7 @@ pub async fn listener(
                     send_message(&mut stream, SocketResponse::FatalError("Server endpoint required: specify with --server <host:port> or set SANDO_ENDPOINT in .env".to_string())).await;
                     continue;
                 };
-                let token = builder.build(&state.root_keypair)?.to_base64()?;
+                let token = builder.build(&state.root_keypair)?.to_vec()?;
                 let init = SidecarInit {
                     id: sidecar_id,
                     token,

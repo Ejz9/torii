@@ -25,7 +25,7 @@ use crate::{acme::dns::sign_csr, error::Error, state::AppState};
 
 pub fn load_or_generate_tunnel_cert(
     sando_path: &str,
-) -> Result<(rustls::ServerConfig, String), Error> {
+) -> Result<(rustls::ServerConfig, [u8; 32]), Error> {
     let cert_path = format!("{sando_path}tunnel_cert.der");
     let key_path = format!("{sando_path}tunnel_key.der");
 
@@ -45,7 +45,8 @@ pub fn load_or_generate_tunnel_cert(
         }
     };
     let digest = digest::digest(&digest::SHA256, &cert_bytes);
-    let fingerprint = hex::encode(digest);
+    let mut fingerprint = [0u8; 32];
+    fingerprint.copy_from_slice(digest.as_ref());
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
