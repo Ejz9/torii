@@ -68,7 +68,10 @@ pub async fn listener(
     let mut addr = SocketAddr::new(state.config.host, state.config.quic_event_port);
     if addr.is_ipv6() && std::net::UdpSocket::bind(addr).is_err() {
         warn!("IPv6 UDP unsupported by kernel, falling back to 0.0.0.0");
-        addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), state.config.quic_event_port);
+        addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            state.config.quic_event_port,
+        );
     }
     let endpoint = quinn::Endpoint::server(server_config, addr)?;
     info!("Listening for QUIC tunnels on {addr}...");
@@ -170,7 +173,9 @@ async fn handle_sidecar(
     }
 
     let mut map = (**state.sidecars.load()).clone();
-    map.insert(id.clone(), connection.clone());
+    if let Some(old_conn) = map.insert(id.clone(), connection.clone()) {
+        old_conn.close(0_u32.into(), b"superseded by new connection");
+    }
     state.sidecars.store(Arc::new(map));
     debug!("Sidecar {id} added to routing table");
 

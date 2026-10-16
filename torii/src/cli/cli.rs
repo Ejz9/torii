@@ -1,4 +1,4 @@
-use keidai::{Route, ShinshiName, TunnelEndpoint};
+use keidai::{ShinshiName, TunnelEndpoint};
 
 use crate::ebpf::kekkai_manager::IpPrefix;
 
@@ -44,8 +44,6 @@ pub enum IpFilter {
 pub struct TunnelArgs {
     #[arg(short = 'n', long = "name")]
     pub name: Option<ShinshiName>,
-    #[arg(short = 'r', long = "routes", num_args = 1..)]
-    pub routes: Vec<Route>,
     #[arg(short = 's', long = "server")]
     pub server: Option<TunnelEndpoint>,
 }

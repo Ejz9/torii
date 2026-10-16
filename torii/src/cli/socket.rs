@@ -137,14 +137,14 @@ pub async fn listener(
                 }
             }
             SocketMessage::TunnelInit(args) => {
-                let active = state.dynamic_config.load();
+                let active = state.sidecars.load();
                 let sidecar_id = args.name.unwrap_or_else(|| {
                     uuid::Uuid::new_v4()
                         .to_string()
                         .parse()
                         .expect("UUID is a valid ShinshiName")
                 });
-                if active.sidecars.contains_key(&sidecar_id) {
+                if active.contains_key(&sidecar_id) {
                     send_message(
                         &mut stream,
                         SocketResponse::FatalError(format!("'{sidecar_id}' already exists")),
@@ -152,30 +152,6 @@ pub async fn listener(
                     .await;
                     continue;
                 }
-                let mut errors = Vec::new();
-                for route in &args.routes {
-                    if let Some(sidecar) = active.sidecar_routes.get(route) {
-                        errors.push(format!("'{route}' is already registered to {sidecar}",));
-                    }
-                    if active.routes.at(&format!("/{route}")).is_ok() {
-                        errors.push(format!(
-                            "'{route}' is already configured as a gateway route"
-                        ));
-                    }
-                }
-
-                if !errors.is_empty() {
-                    send_message(
-                        &mut stream,
-                        SocketResponse::FatalError(format!(
-                            "Route collisions detected:\n - {}",
-                            errors.join("\n -")
-                        )),
-                    )
-                    .await;
-                    continue;
-                }
-
                 let builder = biscuit!(
                     r#"
                     sidecar({id});
