@@ -78,12 +78,18 @@ pub async fn run(
         let cancel_token = cancel_token.clone();
         async move {
             let engine = PolicyEngine::new(hashira_tx, dynamic_config);
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 select! {
                     biased;
                     _ = cancel_token.cancelled() => break,
                     Ok(event) = event_rx.recv_async() => {
                         engine.evaluate_event(&event);
+                    }
+                    _ = interval.tick() => {
+                        engine.ban_v4.run_pending_tasks();
+                        engine.ban_v6.run_pending_tasks();
                     }
                 }
             }
@@ -273,7 +279,7 @@ impl PolicyEngine {
         let Some(cells) = NonZeroU32::new(strikes) else {
             return false;
         };
-        limiter.check_n(cells).is_err()
+        !matches!(limiter.check_n(cells), Ok(Ok(())))
     }
 }
 
@@ -285,7 +291,7 @@ const PENALTY_MINOR: u32 = 1;
 #[inline]
 fn check_latency(status_code: u16, latency: u32) -> u32 {
     match status_code {
-        408 | 504 if latency > 15_000 => PENALTY_SEVERE,
+        408 | 504 if latency > 5000 => PENALTY_SEVERE,
         _ => 0,
     }
 }
@@ -293,7 +299,7 @@ fn check_latency(status_code: u16, latency: u32) -> u32 {
 fn check_status(status_code: u16) -> u32 {
     match status_code {
         400 | 401 | 403 => PENALTY_MODERATE,
-        404 | 405 | 500 | 502 | 503 => PENALTY_MINOR,
+        404 | 405 | 408 | 500 | 502 | 503 => PENALTY_MINOR,
         _ => 0,
     }
 }
@@ -303,8 +309,8 @@ fn check_method(method: &[u8]) -> u32 {
         return PENALTY_INSTANT;
     }
     match method {
-        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" | b"TLS"
-        | b"QUIC" => 0,
+        b"GET" | b"POST" | b"PUT" | b"DELETE" | b"PATCH" | b"OPTIONS" | b"HEAD" | b"TCP"
+        | b"TLS" | b"QUIC" => 0,
         _ => PENALTY_INSTANT,
     }
 }

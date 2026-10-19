@@ -88,20 +88,32 @@ pub async fn serve(
 
         tokio::spawn(async move {
             let mut peek_buf = [0u8; 1024];
-            let ch_bytes = match tcp_stream.peek(&mut peek_buf).await {
-                Ok(ch_bytes) => ch_bytes,
-                Err(_) => {
-                    drop(permit);
-                    return;
-                }
-            };
+            let ch_bytes =
+                match tokio::time::timeout(Duration::from_secs(5), tcp_stream.peek(&mut peek_buf))
+                    .await
+                {
+                    Ok(Ok(ch_bytes)) => ch_bytes,
+                    _ => {
+                        drop(permit);
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "TCP",
+                        ));
+                        return;
+                    }
+                };
             if let Some(domain) = extract_sni(&peek_buf[..ch_bytes]) {
                 let active = config.load();
                 if let Some(sidecar_id) = active.sidecar_routes.get(domain) {
                     drop(permit);
                     let sidecar_conn = tunnels.load().get(sidecar_id).cloned();
                     if let Some(conn) = sidecar_conn {
-                        let Ok((mut quic_send, mut quic_recv)) = conn.open_bi().await else {
+                        let Ok(Ok((mut quic_send, mut quic_recv))) =
+                            tokio::time::timeout(Duration::from_secs(3), conn.open_bi()).await
+                        else {
                             let _ = tx.try_send(ConnectionEvent::new(
                                 0,
                                 502,
@@ -119,8 +131,13 @@ pub async fn serve(
                         return;
                     } else {
                         debug!("Sidecar '{sidecar_id}' for '{domain}' is offline");
-                        let _ =
-                            tx.try_send(ConnectionEvent::new(0, 503, "", remote_addr.ip(), "TCP"));
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            503,
+                            "",
+                            remote_addr.ip(),
+                            "TCP",
+                        ));
                         return;
                     }
                 }
@@ -133,10 +150,21 @@ pub async fn serve(
                         drop(permit);
                         stream
                     }
-                    _ => {
+                    Ok(Err(_)) => {
                         drop(permit);
                         let _ =
                             tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
+                        return;
+                    }
+                    _ => {
+                        drop(permit);
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "TLS",
+                        ));
                         return;
                     }
                 };
@@ -166,6 +194,15 @@ pub async fn serve(
                     .header_read_timeout(Duration::from_secs(5))
                     .keep_alive(true);
                 if let Err(e) = http1.serve_connection(io, service).with_upgrades().await {
+                    if e.is_timeout() {
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "HTTP",
+                        ));
+                    }
                     handle_connection_error(Box::new(e));
                 }
             }
