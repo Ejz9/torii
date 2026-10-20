@@ -76,13 +76,15 @@ impl ActiveState {
             .iter()
             .map(|s| s.as_bytes())
             .collect();
-        let Ok(matcher) = AhoCorasick::new(path_bytes) else {
-            error!("Failed to create path matcher");
-            return Err(Error::InvalidCustomSetup(
-                "Invalid forbidden_paths pattern".to_string(),
-            ));
-        };
-        config.security.path_matcher = Arc::new(matcher);
+        if !config.security.forbidden_paths.is_empty() {
+            let Ok(matcher) = AhoCorasick::new(path_bytes) else {
+                error!("Failed to create path matcher");
+                return Err(Error::InvalidCustomSetup(
+                    "Invalid forbidden_paths pattern".to_string(),
+                ));
+            };
+            config.security.path_matcher = Some(Arc::new(matcher));
+        }
         let mut individual_certs = HashSet::new();
         let mut wildcard_certs = HashSet::new();
         let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
@@ -280,8 +282,8 @@ pub struct SecurityConfig {
     pub ebpf_velocity_threshhold: u64,
     #[serde(default = "ebpf_lockout_duration_secs")]
     pub ebpf_lockout_duration_secs: u64,
-    #[serde(skip, default = "default_path_matcher")]
-    pub path_matcher: Arc<AhoCorasick>,
+    #[serde(skip)]
+    pub path_matcher: Option<Arc<AhoCorasick>>,
 }
 
 impl Default for SecurityConfig {
@@ -292,7 +294,7 @@ impl Default for SecurityConfig {
             ebpf_strike_threshold: 10,
             ebpf_velocity_threshhold: 150,
             ebpf_lockout_duration_secs: 3600,
-            path_matcher: default_path_matcher(),
+            path_matcher: None,
         }
     }
 }
@@ -311,9 +313,6 @@ fn ebpf_velocity_threshhold() -> u64 {
 }
 fn ebpf_lockout_duration_secs() -> u64 {
     3600
-}
-fn default_path_matcher() -> Arc<AhoCorasick> {
-    Arc::new(AhoCorasick::new(Vec::<&[u8]>::new()).unwrap())
 }
 
 #[derive(Clone)]

@@ -15,6 +15,7 @@ use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
 use keidai::ConnectionEvent;
+use quinn::crypto::rustls::QuicServerConfig;
 use rustls::ServerConfig;
 use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::server::ServerSessionMemoryCache;
@@ -47,6 +48,7 @@ use crate::ebpf::ofuda::OfudaEntry;
 use crate::env::Config;
 use crate::proxy::middleware::temizuya;
 use crate::proxy::router::handle_any;
+use crate::proxy::server::serve_h3;
 use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
 use crate::tunnel::sando;
@@ -183,6 +185,14 @@ async fn main() -> anyhow::Result<()> {
             config.session_storage = ServerSessionMemoryCache::new(20_000);
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
+            let mut h3_tls = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
+                    &state.certificates,
+                ))));
+            h3_tls.alpn_protocols = vec![b"h3".to_vec()];
+            let quic_crypto = QuicServerConfig::try_from(h3_tls)?;
+            let quinn_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
             let socket_addr = match state.config.host {
                 IpAddr::V6(_) if TcpSocket::new_v6().is_err() => {
                     warn!("IPv6 unsupported by kernel, falling back to 0.0.0.0");
@@ -195,11 +205,6 @@ async fn main() -> anyhow::Result<()> {
             let mut servers = Vec::new();
             let handshake_limit = (nr_cpus * 128).clamp(256, 1024);
             for _ in 0..nr_cpus {
-                let socket_addr = socket_addr;
-                let app = app.clone();
-                let acceptor = acceptor.clone(); // Is this necessary?
-                let event_tx = event_tx.clone();
-                let network_token = network_token.clone();
                 let socket = match socket_addr {
                     SocketAddr::V6(_) => TcpSocket::new_v6()?,
                     SocketAddr::V4(_) => TcpSocket::new_v4()?,
@@ -229,6 +234,13 @@ async fn main() -> anyhow::Result<()> {
                     state.sidecars.clone(),
                 )));
             }
+            let h3_listener = quinn::Endpoint::server(quinn_config, socket_addr)?;
+            servers.push(tokio::spawn(serve_h3(
+                h3_listener,
+                app.clone(),
+                event_tx.clone(),
+                network_token.clone(),
+            )));
             info!("Listening on {socket_addr} across {nr_cpus} listeners...");
 
             select! {

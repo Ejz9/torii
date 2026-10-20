@@ -1,5 +1,7 @@
 use arc_swap::ArcSwap;
-use axum::Router;
+use axum::{Router, http, response::IntoResponse};
+use http_body_util::BodyExt;
+use hyper::StatusCode;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use keidai::{ConnectionEvent, ShinshiName};
 use rustls::{
@@ -46,6 +48,7 @@ impl ResolvesServerCert for CertificateResolver {
     }
 }
 
+// TCP HTTP connection server based on RFC 9112 and RFC 9113
 pub async fn serve(
     listener: TcpListener,
     routes: Router,
@@ -211,6 +214,77 @@ pub async fn serve(
     Ok(())
 }
 
+// UDP HTTP connection server based on RFC 9000 and RFC 9114
+pub async fn serve_h3(
+    endpoint: quinn::Endpoint,
+    routes: Router,
+    event_tx: flume::Sender<ConnectionEvent>,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
+    // a handshake_limiter may be useful (needs testing) but quic has built in protections (anti-amplification, retries)
+    loop {
+        let incoming = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => break,
+            conn = endpoint.accept() => {
+                match conn {
+                    Some(incoming) => incoming,
+                    None => break,
+                }
+            }
+        };
+        let app = routes.clone();
+        tokio::spawn(async move {
+            let connection = match incoming.await {
+                Ok(conn) => conn,
+                Err(_) => return,
+            };
+            let remote_addr = connection.remote_address();
+            let h3_quin_conn = h3_quinn::Connection::new(connection);
+            let Ok(mut h3_conn) = h3::server::Connection::new(h3_quin_conn).await else {
+                return;
+            };
+            while let Ok(Some(resolver)) = h3_conn.accept().await {
+                let mut app = app.clone();
+                tokio::spawn(async move {
+                    let Ok((req, mut stream)) = resolver.resolve_request().await else {
+                        return;
+                    };
+                    let (mut parts, ()) = req.into_parts();
+                    parts
+                        .extensions
+                        .insert(axum::extract::ConnectInfo(remote_addr));
+                    let request = axum::http::Request::from_parts(parts, axum::body::Body::empty());
+                    let response = match app.call(request).await {
+                        Ok(res) => res,
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    };
+                    let (parts, mut body) = response.into_parts();
+                    if let Err(e) = stream
+                        .send_response(http::Response::from_parts(parts, ()))
+                        .await
+                    {
+                        handle_connection_error(Box::new(e));
+                        return;
+                    }
+                    while let Some(Ok(frame)) = body.frame().await {
+                        if let Some(chunk) = frame.data_ref() {
+                            if let Err(e) = stream.send_data(chunk.clone()).await {
+                                handle_connection_error(Box::new(e));
+                                break;
+                            }
+                        }
+                    }
+                    if let Err(e) = stream.finish().await {
+                        handle_connection_error(Box::new(e));
+                    }
+                });
+            }
+        });
+    }
+    Ok(())
+}
+
 fn handle_connection_error(e: Box<dyn std::error::Error + Send + Sync>) {
     let is_client_disconnect = if let Some(error) = e.downcast_ref::<hyper::Error>() {
         error.is_incomplete_message() || error.is_canceled()
@@ -230,8 +304,12 @@ fn handle_connection_error(e: Box<dyn std::error::Error + Send + Sync>) {
             )
         })
         .unwrap_or(false);
-
-    if is_client_disconnect || is_io_disconnect {
+    let is_h3_disconnect = if let Some(error) = e.downcast_ref::<h3::error::StreamError>() {
+        matches!(error, h3::error::StreamError::RemoteTerminate { .. }) || error.is_h3_no_error()
+    } else {
+        false
+    };
+    if is_client_disconnect || is_io_disconnect || is_h3_disconnect {
         debug!("Client disconnected early: {}", e);
     } else {
         error!("Failed to serve connection: {}", e)

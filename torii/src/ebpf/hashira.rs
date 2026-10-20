@@ -207,11 +207,10 @@ impl PolicyEngine {
         strikes += check_latency(event.status_code, event.latency_ms);
         strikes += check_status(event.status_code);
         strikes += check_method(&event.method[..event.method_len as usize]);
-        if security_config
-            .path_matcher
-            .is_match(&event.path[..event.path_len as usize])
-        {
-            strikes += security_config.ebpf_strike_threshold as u32;
+        if let Some(matcher) = &security_config.path_matcher {
+            if matcher.is_match(&event.path[..event.path_len as usize]) {
+                strikes += security_config.ebpf_strike_threshold as u32;
+            }
         }
 
         if strikes > 0 {

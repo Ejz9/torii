@@ -100,6 +100,10 @@ pub async fn handle_any(
                 hyper::header::X_FRAME_OPTIONS,
                 HeaderValue::from_static("SAMEORIGIN"),
             );
+            headers.insert(
+                hyper::header::ALT_SVC,
+                HeaderValue::from_static("h3=\":443\"; ma=86400"),
+            );
             if is_upgrade {
                 if let Some(client_intent) = upgrade_intent {
                     let server_intent = hyper::upgrade::on(&mut res);
