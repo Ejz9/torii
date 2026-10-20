@@ -1,6 +1,6 @@
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
-    RetryPolicy,
+    Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, Order,
+    OrderStatus, RetryPolicy,
 };
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
@@ -64,6 +64,7 @@ pub async fn acme_worker(
     Ok(())
 }
 
+/// ACME based on RFC 8555
 async fn refresh_certificates(
     state: &AppState,
     acme_provider: &ProviderKind,
@@ -372,7 +373,22 @@ async fn process_domain(
     };
 
     let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
+    solve_dns_challenge(&mut order, acme_provider, domain).await?;
+    let private_key_pem = order.finalize().await?;
+    let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
 
+    fs::create_dir_all(&save_path).await?;
+    fs::write(save_path.join("privkey.pem"), &private_key_pem).await?;
+    fs::write(save_path.join("fullchain.pem"), &cert_chain_pem).await?;
+    let certificate = parse_certificate(private_key_pem.into_bytes(), cert_chain_pem.into_bytes())?;
+    Ok(certificate)
+}
+
+async fn solve_dns_challenge(
+    order: &mut Order,
+    acme_provider: &ProviderKind,
+    domain: String,
+) -> Result<(), Error> {
     let mut authorizations = order.authorizations();
     let mut cleanup_records = Vec::new();
     while let Some(Ok(mut authz)) = authorizations.next().await {
@@ -405,14 +421,25 @@ async fn process_domain(
     if status != OrderStatus::Ready {
         return Err(Error::AcmeOrderFailed { domain, status });
     }
-    let private_key_pem = order.finalize().await?;
-    let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
+    Ok(())
+}
 
-    fs::create_dir_all(&save_path).await?;
-    fs::write(save_path.join("privkey.pem"), &private_key_pem).await?;
-    fs::write(save_path.join("fullchain.pem"), &cert_chain_pem).await?;
-    let certificate = parse_certificate(private_key_pem.into_bytes(), cert_chain_pem.into_bytes())?;
-    Ok(certificate)
+pub async fn sign_csr(
+    state: &AppState,
+    domain: String,
+    csr_der: &[u8],
+) -> Result<String, Error> {
+    let Some(acme_provider) = &state.config.acme_provider else {
+        return Err(Error::InvalidCustomSetup(
+            "ACME provider not configured".to_string(),
+        ));
+    };
+    let account = get_or_create_account(state).await?;
+    let identifiers = vec![Identifier::Dns(domain.clone())];
+    let mut order = account.new_order(&NewOrder::new(&identifiers)).await?;
+    solve_dns_challenge(&mut order, acme_provider, domain).await?;
+    order.finalize_csr(csr_der).await?;
+    Ok(order.poll_certificate(&RetryPolicy::default()).await?)
 }
 
 pub fn parse_certificate(

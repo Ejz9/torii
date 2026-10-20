@@ -1,3 +1,5 @@
+use keidai::TunnelEndpoint;
+
 use crate::acme::providers::ProviderKind;
 use crate::acme::providers::cloudflare::CloudflareProvider;
 use crate::auth::oidc::OidcProvider;
@@ -5,13 +7,13 @@ use crate::ebpf::mihari::MihariProviderKind;
 use crate::ebpf::mihari::crowdsec::CrowdSecProvider;
 use crate::error::Error;
 use std::env::var;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 #[derive(Debug)]
 pub struct Config {
     pub interface: Option<String>,
     pub port: u16,
     pub quic_event_port: u16,
-    pub host: Ipv4Addr,
+    pub host: IpAddr,
     pub oidc_provider: Option<OidcProvider>,
     pub acme_directory_url: String,
     pub acme_provider: Option<ProviderKind>,
@@ -25,6 +27,7 @@ pub struct Config {
     pub ebpf_metrics: bool,
     pub sando_path: String,
     pub biscuit_path: String,
+    pub sando_endpoint: Option<TunnelEndpoint>,
 }
 
 impl Config {
@@ -35,7 +38,7 @@ impl Config {
             .unwrap_or_else(|_| "10000".to_string())
             .parse()?;
         let host = var("HOST")
-            .unwrap_or_else(|_| "0.0.0.0".to_string())
+            .unwrap_or_else(|_| "::".to_string())
             .parse()?;
         let oidc_issuer_url = var("OIDC_ISSUER_URL").ok();
         let oidc_client_id = var("OIDC_CLIENT_ID").ok();
@@ -112,6 +115,11 @@ impl Config {
         let ebpf_metrics = var("EBPF_METRICS")
             .map(|v| v.parse::<bool>().unwrap_or(true))
             .unwrap_or(false);
+        let sando_endpoint = var("SANDO_ENDPOINT")
+            .ok()
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| Error::Env(format!("Invalid SANDO_ENDPOINT: {e}")))?;
         Ok(Config {
             interface,
             port,
@@ -130,6 +138,7 @@ impl Config {
             ebpf_metrics,
             sando_path,
             biscuit_path,
+            sando_endpoint,
         })
     }
 }

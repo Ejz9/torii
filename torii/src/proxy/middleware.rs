@@ -29,7 +29,7 @@ fn inject_headers(
     Ok(())
 }
 
-//#[instrument(skip(state, headers), err)]
+/// Request middleware based on https://www.w3.org/TR/fetch-metadata/
 pub async fn enforce_auth(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -99,7 +99,7 @@ pub async fn enforce_auth(
                     .route
                     .allowed_asset_paths
                     .iter()
-                    .any(|path| matched_route.catch_all.starts_with(path))
+                    .any(|path| matched_route.catch_all.starts_with(path.as_ref()))
             {
                 return Ok(next.run(req).await.into_response());
             }
@@ -131,13 +131,7 @@ pub async fn enforce_auth(
                 "#,
                 now = SystemTime::now()
             );
-            if matched_route.route.allowed_groups.is_empty() {
-                builder = builder.code("allow if true;")?;
-            } else {
-                for group in &matched_route.route.allowed_groups {
-                    builder = builder.code(format!("allow if group(\"{group}\");"))?;
-                }
-            }
+            builder = builder.code(&matched_route.route.allowed_groups_datalog_policy)?;
             let mut authorizer = builder.build(&biscuit_token)?;
             match authorizer.authorize() {
                 Ok(_) => {}

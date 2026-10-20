@@ -9,6 +9,7 @@ use std::{
 
 use aho_corasick::AhoCorasick;
 use axum::http;
+use keidai::{CleanPath, Route, RouteConfig, ShinshiName, SidecarConfig};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -18,15 +19,17 @@ use crate::{
     error::Error,
 };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct ToriiConfig {
     #[serde(default)]
-    ddns_domain: Option<String>,
+    ddns_domain: Option<Route>,
     #[serde(default)]
     security: SecurityConfig,
     #[serde(default)]
-    routes: HashMap<String, RouteConfig>,
+    routes: HashMap<Route, RouteConfig>,
+    #[serde(default)]
+    sidecars: HashMap<ShinshiName, SidecarConfig>,
 }
 
 impl Default for ToriiConfig {
@@ -35,14 +38,17 @@ impl Default for ToriiConfig {
             ddns_domain: None,
             security: SecurityConfig::default(),
             routes: HashMap::new(),
+            sidecars: HashMap::new(),
         }
     }
 }
 
 pub struct ActiveState {
-    pub ddns_domain: Option<String>,
+    pub ddns_domain: Option<Route>,
     pub security: SecurityConfig,
     pub routes: matchit::Router<Arc<ActiveRoute>>,
+    pub sidecar_routes: HashMap<Route, ShinshiName>,
+    pub sidecars: HashMap<ShinshiName, SidecarConfig>,
 }
 
 #[derive(Clone)]
@@ -70,32 +76,34 @@ impl ActiveState {
             .iter()
             .map(|s| s.as_bytes())
             .collect();
-        let Ok(matcher) = AhoCorasick::new(path_bytes) else {
-            error!("Failed to create path matcher");
-            return Err(Error::InvalidCustomSetup(
-                "Invalid forbidden_paths pattern".to_string(),
-            ));
-        };
-        config.security.path_matcher = Arc::new(matcher);
+        if !config.security.forbidden_paths.is_empty() {
+            let Ok(matcher) = AhoCorasick::new(path_bytes) else {
+                error!("Failed to create path matcher");
+                return Err(Error::InvalidCustomSetup(
+                    "Invalid forbidden_paths pattern".to_string(),
+                ));
+            };
+            config.security.path_matcher = Some(Arc::new(matcher));
+        }
         let mut individual_certs = HashSet::new();
         let mut wildcard_certs = HashSet::new();
         let mut valid_certificates: HashMap<String, Arc<CertifiedKey>> = HashMap::new();
         let mut router = matchit::Router::new();
+        let gateway_routes: HashSet<Route> = config.routes.keys().cloned().collect();
         for (route, value) in config.routes.into_iter() {
-            let clean_route = route.trim_end_matches('/');
-            let domain = clean_route.parse::<DomainTier>()?;
+            let domain = route.parse::<DomainTier>()?;
             if value.tls_cert_path.is_none() && value.tls_key_path.is_none() {
                 match domain {
                     DomainTier::Root | DomainTier::Nested => {
-                        individual_certs.insert(clean_route.to_string());
+                        individual_certs.insert(route.to_string());
                     }
                     DomainTier::Subdomain => {
                         if value.individual_cert
                             || !config.security.default_certificate_mode_wildcard
                         {
-                            individual_certs.insert(clean_route.to_string());
+                            individual_certs.insert(route.to_string());
                         } else {
-                            if let Some((_, root)) = clean_route.split_once(".") {
+                            if let Some((_, root)) = route.split_once(".") {
                                 if !root.is_empty() {
                                     wildcard_certs.insert(root.to_string());
                                 }
@@ -105,21 +113,60 @@ impl ActiveState {
                 }
             } else {
                 let certificate =
-                    match validate_and_parse_custom_certificates(&value, clean_route, verifier) {
+                    match validate_and_parse_custom_certificates(&value, &route, verifier) {
                         Ok(certificate) => certificate,
                         Err(e) => {
                             error!("Failed to parse certificate for route: {}: {}", route, e);
                             continue;
                         }
                     };
-                valid_certificates.insert(clean_route.to_string(), certificate);
+                valid_certificates.insert(route.to_string(), certificate);
             }
+            let aliases = value.aliases.clone();
+            let individual_cert = value.individual_cert;
             let active_route = Arc::new(value.try_into()?);
-            let exact_pattern = format!("/{}", clean_route);
+            let exact_pattern = format!("/{route}");
             router.insert(exact_pattern, Arc::clone(&active_route))?;
 
-            let catch_all_pattern = format!("/{}/{{*catch_all}}", clean_route);
-            router.insert(catch_all_pattern, active_route)?;
+            let catch_all_pattern = format!("/{route}/{{*catch_all}}");
+            router.insert(catch_all_pattern, Arc::clone(&active_route))?;
+
+            if !aliases.is_empty() {
+                for alias in aliases {
+                    if individual_cert || !config.security.default_certificate_mode_wildcard {
+                        individual_certs.insert(alias.to_string());
+                    } else {
+                        if let Some((_, root)) = alias.split_once(".") {
+                            if !root.is_empty() {
+                                wildcard_certs.insert(root.to_string());
+                            }
+                        }
+                    }
+                    router.insert(format!("/{alias}"), Arc::clone(&active_route))?;
+                    router.insert(
+                        format!("/{alias}/{{*catch_all}}"),
+                        Arc::clone(&active_route),
+                    )?;
+                }
+            }
+        }
+
+        let mut sidecar_routes = HashMap::new();
+        for (sidecar_id, sidecar_cfg) in &config.sidecars {
+            for route in sidecar_cfg.routes.keys() {
+                if gateway_routes.contains(route) {
+                    return Err(Error::InvalidCustomSetup(format!(
+                        "Route collision: '{route}' is configured as both a gateway and sidecar route"
+                    )));
+                }
+                if let Some(existing_sidecar) =
+                    sidecar_routes.insert(route.clone(), sidecar_id.clone())
+                {
+                    return Err(Error::InvalidCustomSetup(format!(
+                        "Route collision: '{route}' is claimed by '{existing_sidecar}' and '{sidecar_id}'"
+                    )));
+                }
+            }
         }
 
         Ok((
@@ -127,6 +174,8 @@ impl ActiveState {
                 ddns_domain: config.ddns_domain,
                 security: config.security,
                 routes: router,
+                sidecar_routes,
+                sidecars: config.sidecars,
             },
             individual_certs,
             wildcard_certs,
@@ -221,20 +270,20 @@ fn validate_and_parse_custom_certificates(
     Ok(parse_certificate(key_bytes, cert_bytes)?)
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SecurityConfig {
     #[serde(default = "default_certificate_mode_wildcard")]
     default_certificate_mode_wildcard: bool,
     #[serde(default = "forbidden_paths")]
-    forbidden_paths: Vec<String>,
+    pub forbidden_paths: Vec<String>,
     #[serde(default = "ebpf_strike_threshold")]
     pub ebpf_strike_threshold: u64,
     #[serde(default = "ebpf_velocity_threshhold")]
     pub ebpf_velocity_threshhold: u64,
     #[serde(default = "ebpf_lockout_duration_secs")]
     pub ebpf_lockout_duration_secs: u64,
-    #[serde(skip, default = "default_path_matcher")]
-    pub path_matcher: Arc<AhoCorasick>,
+    #[serde(skip)]
+    pub path_matcher: Option<Arc<AhoCorasick>>,
 }
 
 impl Default for SecurityConfig {
@@ -245,7 +294,7 @@ impl Default for SecurityConfig {
             ebpf_strike_threshold: 10,
             ebpf_velocity_threshhold: 150,
             ebpf_lockout_duration_secs: 3600,
-            path_matcher: default_path_matcher(),
+            path_matcher: None,
         }
     }
 }
@@ -265,34 +314,6 @@ fn ebpf_velocity_threshhold() -> u64 {
 fn ebpf_lockout_duration_secs() -> u64 {
     3600
 }
-fn default_path_matcher() -> Arc<AhoCorasick> {
-    Arc::new(AhoCorasick::new(Vec::<&[u8]>::new()).unwrap())
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RouteConfig {
-    upstream: String,
-    #[serde(default = "default_max_connections")]
-    max_concurrent_connections: usize,
-    #[serde(default)]
-    public_bypass: bool,
-    #[serde(default)]
-    tls_insecure_skip_verify: bool,
-    #[serde(default)]
-    individual_cert: bool,
-    #[serde(default)]
-    tls_cert_path: Option<String>,
-    #[serde(default)]
-    tls_key_path: Option<String>,
-    #[serde(default)]
-    allowed_asset_paths: Vec<String>,
-    #[serde(default)]
-    allowed_groups: Vec<String>,
-}
-
-fn default_max_connections() -> usize {
-    256
-}
 
 #[derive(Clone)]
 pub struct ActiveRoute {
@@ -303,8 +324,8 @@ pub struct ActiveRoute {
     pub upstream_host_header: http::HeaderValue,
     pub public_bypass: bool,
     pub tls_insecure_skip_verify: bool,
-    pub allowed_asset_paths: Vec<String>,
-    pub allowed_groups: Vec<String>,
+    pub allowed_asset_paths: Vec<CleanPath>,
+    pub allowed_groups_datalog_policy: String,
 }
 
 impl TryFrom<RouteConfig> for ActiveRoute {
@@ -321,6 +342,16 @@ impl TryFrom<RouteConfig> for ActiveRoute {
         let upstream_limiter = Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_connections,
         ));
+        let allowed_groups_datalog_policy = if config.allowed_groups.is_empty() {
+            "allow if true;".to_string()
+        } else {
+            config
+                .allowed_groups
+                .iter()
+                .map(|g| format!("allow if group(\"{g}\");"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         Ok(ActiveRoute {
             upstream,
             upstream_limiter,
@@ -330,7 +361,7 @@ impl TryFrom<RouteConfig> for ActiveRoute {
             public_bypass: config.public_bypass,
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
             allowed_asset_paths: config.allowed_asset_paths,
-            allowed_groups: config.allowed_groups,
+            allowed_groups_datalog_policy,
         })
     }
 }
@@ -346,8 +377,7 @@ impl FromStr for DomainTier {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.split(".").count();
         match s.split(".").count() {
-            0 => Err(Error::InvalidDomain),
-            1 => Err(Error::InvalidDomain),
+            0 | 1 => Err(Error::InvalidDomain),
             2 => Ok(DomainTier::Root),
             3 => Ok(DomainTier::Subdomain),
             _ => Ok(DomainTier::Nested),
@@ -400,5 +430,55 @@ impl AsRef<str> for SmallPath {
     #[inline]
     fn as_ref(&self) -> &str {
         self.deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_minimal_config() {
+        let toml_str = r#"
+            [security]
+            default_certificate_mode_wildcard = false
+            ebpf_strike_threshold = 10
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(res.is_ok(), "Expected valid TOML to parse successfully");
+    }
+
+    #[test]
+    fn test_deny_unkown_fields_at_root() {
+        let toml_str = r#"
+            unknown_root_key = "should_fail"
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(res.is_err(), "Expected unknown field to trigger an error");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("unknown field `unknown_root_key`"));
+    }
+
+    #[test]
+    fn test_sidecar_config_parsing() {
+        let toml_str = r#"
+            [sidecars.my_sidecar]
+            forbidden_paths = ["admin", "private"]
+
+            [sidecars.my_sidecar.routes."app.example.com"]
+            upstream = "http://127.0.0.1:8080"
+            public_bypass = true
+        "#;
+        let res: Result<ToriiConfig, _> = toml::from_str(toml_str);
+        assert!(
+            res.is_ok(),
+            "Failed to parse valid sidecar config: {:?}",
+            res.err()
+        );
+        let config = res.unwrap();
+        let sidecar_name = "my_sidecar".parse::<ShinshiName>().unwrap();
+        assert!(config.sidecars.contains_key(&sidecar_name));
+        let sidecar = &config.sidecars[&sidecar_name];
+        assert_eq!(sidecar.forbidden_paths, vec!["admin", "private"]);
     }
 }

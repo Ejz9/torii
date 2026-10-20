@@ -7,9 +7,10 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::{io::Write, net::IpAddr, sync::Arc};
+use std::{net::IpAddr, sync::Arc};
 use tracing::debug;
 
+/// Request and response pipeline based on RFC 9110, RFC 9113, and RFC 6455
 pub async fn handle_any(
     State(state): State<Arc<AppState>>,
     ip: ConnectInfo<std::net::SocketAddr>,
@@ -18,15 +19,11 @@ pub async fn handle_any(
     let source_ip = &ip.ip();
     let upgrade_intent = req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>();
     let (mut parts, body) = req.into_parts();
-    let host_header = parts.headers.get(hyper::header::HOST).cloned().or_else(|| {
-        parts
-            .uri
-            .authority()
-            .and_then(|auth| HeaderValue::from_str(auth.host()).ok())
-    });
-    let host_str = host_header
-        .as_ref()
+    let host_str = parts
+        .headers
+        .get(hyper::header::HOST)
         .and_then(|h| h.to_str().ok())
+        .or_else(|| parts.uri.host())
         .unwrap_or("unkown_host");
     let Some(matched_route) = parts.extensions.remove::<RouteMatch>().or_else(|| {
         state
@@ -69,7 +66,6 @@ pub async fn handle_any(
         &mut parts.headers,
         source_ip,
         &matched_route.route.upstream_host_header,
-        host_header,
     );
     let req = Request::from_parts(parts, body);
 
@@ -88,16 +84,9 @@ pub async fn handle_any(
     match pool.request(req).await {
         Ok(mut res) => {
             drop(permit);
+            let is_upgrade = res.status() == StatusCode::SWITCHING_PROTOCOLS;
             let headers = res.headers_mut();
-            headers.remove(hyper::header::UPGRADE);
-            headers.insert(
-                hyper::header::CONNECTION,
-                HeaderValue::from_static("keep-alive"),
-            );
-            headers.insert(
-                HeaderName::from_static("keep-alive"),
-                HeaderValue::from_static("timeout=65"),
-            );
+            headers.reserve(6);
             headers.insert(hyper::header::SERVER, HeaderValue::from_static("Torii"));
             headers.insert(
                 hyper::header::STRICT_TRANSPORT_SECURITY,
@@ -111,7 +100,11 @@ pub async fn handle_any(
                 hyper::header::X_FRAME_OPTIONS,
                 HeaderValue::from_static("SAMEORIGIN"),
             );
-            if res.status() == StatusCode::SWITCHING_PROTOCOLS {
+            headers.insert(
+                hyper::header::ALT_SVC,
+                HeaderValue::from_static("h3=\":443\"; ma=86400"),
+            );
+            if is_upgrade {
                 if let Some(client_intent) = upgrade_intent {
                     let server_intent = hyper::upgrade::on(&mut res);
                     tokio::spawn(async move {
@@ -130,6 +123,18 @@ pub async fn handle_any(
                 } else {
                     debug!("Failed to upgrade. Client or server rejected the handshake.")
                 }
+            } else {
+                headers.remove(hyper::header::UPGRADE);
+                headers.remove(hyper::header::TRANSFER_ENCODING);
+                headers.remove(HeaderName::from_static("proxy-connection"));
+                headers.insert(
+                    hyper::header::CONNECTION,
+                    HeaderValue::from_static("keep-alive"),
+                );
+                headers.insert(
+                    HeaderName::from_static("keep-alive"),
+                    HeaderValue::from_static("timeout=65"),
+                );
             }
             Ok(res.map(|body| Body::new(body)).into_response())
         }
@@ -141,50 +146,99 @@ pub async fn handle_any(
     }
 }
 
-const STRIP_HEADERS: [HeaderName; 13] = [
-    HeaderName::from_static("x-forwarded-user"),
-    HeaderName::from_static("x-forwarded-email"),
-    HeaderName::from_static("x-forwarded-groups"),
-    HeaderName::from_static("x-real-ip"),
-    hyper::header::SERVER,
-    hyper::header::CONNECTION,
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-authenticate"),
-    HeaderName::from_static("proxy-authorization"),
-    HeaderName::from_static("te"),
-    HeaderName::from_static("trailers"),
-    hyper::header::TRANSFER_ENCODING,
-    hyper::header::UPGRADE,
-];
-
 fn inject_headers(
     request_headers: &mut HeaderMap,
     source_ip: &IpAddr,
     upstream_host: &HeaderValue,
-    original_host: Option<HeaderValue>,
 ) -> Result<(), Error> {
-    for header in &STRIP_HEADERS {
-        request_headers.remove(header);
+    let connection_tokens = request_headers
+        .get(hyper::header::CONNECTION)
+        .and_then(|h| h.to_str().ok());
+    let mut to_remove: [Option<hyper::header::HeaderName>; 16] = Default::default();
+    let mut remove_count = 0;
+    for name in request_headers.keys() {
+        let is_conn_token = connection_tokens.is_some_and(|tokens| {
+            tokens
+                .split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case(name.as_str()))
+        });
+        if is_forbidden_header(name.as_str()) || is_conn_token {
+            if remove_count >= 16 {
+                return Err(Error::Http(
+                    StatusCode::BAD_REQUEST,
+                    "Too many hop-by-hop headers",
+                ));
+            }
+            to_remove[remove_count] = Some(name.clone());
+            remove_count += 1;
+        }
+    }
+    for i in 0..remove_count {
+        if let Some(ref name) = to_remove[i] {
+            request_headers.remove(name);
+        }
     }
     request_headers.insert(
         hyper::header::CONNECTION,
         HeaderValue::from_static("keep-alive"),
     );
-    let mut ip_buf = [0u8; 46];
-    let len = {
-        let mut cursor = std::io::Cursor::new(&mut ip_buf[..]);
-        write!(cursor, "{}", source_ip)?;
-        cursor.position() as usize
+    let ip_header_val = match source_ip {
+        IpAddr::V4(ipv4) => {
+            let mut buf = [0u8; 15];
+            let len = format_ipv4_ascii(ipv4, &mut buf);
+            HeaderValue::from_bytes(&buf[..len])?
+        }
+        IpAddr::V6(ipv6) => HeaderValue::from_str(&ipv6.to_string())?,
     };
-    let ip_header_val = HeaderValue::from_bytes(&ip_buf[..len])?;
     request_headers.insert(HeaderName::from_static("x-forwarded-for"), ip_header_val);
     request_headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static("https"),
     );
-    request_headers.insert(hyper::header::HOST, upstream_host.clone());
-    if let Some(host_val) = original_host {
+    if let Some(host_val) = request_headers.remove(hyper::header::HOST) {
         request_headers.insert(HeaderName::from_static("x-forwarded-host"), host_val);
     }
+    request_headers.insert(hyper::header::HOST, upstream_host.clone());
     Ok(())
+}
+
+fn is_forbidden_header(name: &str) -> bool {
+    name.starts_with("x-forwarded-")
+        || matches!(
+            name,
+            "x-real-ip"
+                | "server"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailers"
+                | "transfer-encoding"
+                | "upgrade"
+        )
+}
+
+fn format_ipv4_ascii(ipv4: &std::net::Ipv4Addr, buf: &mut [u8; 15]) -> usize {
+    let octets = ipv4.octets();
+    let mut pos = 0;
+    for (idx, &octet) in octets.iter().enumerate() {
+        if idx > 0 {
+            buf[pos] = b'.';
+            pos += 1;
+        }
+        if octet >= 100 {
+            buf[pos] = b'0' + (octet / 100);
+            buf[pos + 1] = b'0' + ((octet / 10) % 10);
+            buf[pos + 2] = b'0' + (octet % 10);
+            pos += 3;
+        } else if octet >= 10 {
+            buf[pos] = b'0' + (octet / 10);
+            buf[pos + 1] = b'0' + (octet % 10);
+            pos += 2;
+        } else {
+            buf[pos] = b'0' + octet;
+            pos += 1;
+        }
+    }
+    pos
 }

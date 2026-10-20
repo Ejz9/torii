@@ -6,6 +6,10 @@ use tracing::{error, info};
 
 use crate::{acme::providers::ProviderKind, state::AppState};
 
+/// Endpoint documentation:
+/// https://developers.cloudflare.com/1.1.1.1/setup/
+/// https://developers.cloudflare.com/support/troubleshooting/general-troubleshooting/gathering-information-for-troubleshooting-sites/
+/// https://1.1.1.1/help (Shows IPv4 and IPv6 support)
 pub async fn run(
     state: Arc<AppState>,
     acme_provider: ProviderKind,
@@ -14,6 +18,7 @@ pub async fn run(
     let mut last_known_ip: Option<std::net::IpAddr> = None;
     let mut cached_record_id: Option<String> = None;
     let mut failed_attempts = 0;
+    let mut supports_v6 = state.config.host.is_ipv6();
     loop {
         select! {
             biased;
@@ -29,8 +34,16 @@ pub async fn run(
             sleep(Duration::from_mins(5)).await;
             continue;
         };
-        let Ok(response) = reqwest::get("https://1.1.1.1/cdn-cgi/trace").await else {
+        let endpoint = if supports_v6 {
+            "https://[2606:4700:4700::1111 ]/cdn-cgi/trace"
+        } else {
+            "https://1.1.1.1/cdn-cgi/trace"
+        };
+        let Ok(response) = reqwest::get(endpoint).await else {
             error!("Failed to fetch IP address from cloudflare");
+            if supports_v6 {
+                supports_v6 = false;
+            }
             failed_attempts += 1;
             sleep(Duration::from_secs(cmp::min(failed_attempts * 30, 900))).await;
             continue;

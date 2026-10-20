@@ -1,6 +1,16 @@
-use std::net::{IpAddr, Ipv6Addr};
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    fmt::Display,
+    net::{IpAddr, Ipv6Addr},
+    ops::Deref,
+    str::FromStr,
+};
 
-use linux_futex::{Futex, Shared};
+use anyhow::bail;
+use base64::prelude::*;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 #[repr(C)]
@@ -63,8 +73,258 @@ impl ConnectionEvent {
     }
 }
 
-#[repr(C)]
-pub struct BufferHeader {
-    pub write_head: Futex<Shared>,
-    pub read_head: Futex<Shared>,
+#[derive(Serialize, Deserialize)]
+pub enum ControlMessage {
+    Auth { token: Vec<u8> },
+    SyncConfig(SidecarConfig),
+    CertRequest { domain: String, csr: Vec<u8> },
+    CertResponse { domain: String, cert_chain: String },
+    CertError { domain: String, error: String },
+    Ready,
+}
+
+/// Route validator based on RFC 1035, RFC 1123 and RFC 2181
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct Route(String);
+
+impl FromStr for Route {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains('*') {
+            bail!("Route must not contain '*'");
+        }
+        let s = s.trim_end_matches('/');
+        if s.contains('/') {
+            bail!("Route must not contain additional '/'");
+        }
+        if s.len() >= 253 {
+            bail!("Route must not be longer than 253 characters")
+        }
+        if s.split('.').count() < 2 {
+            bail!("Domain must contain at least two labels (e.g example.com)")
+        }
+        let labels = s.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        });
+        if !labels {
+            bail!("Domain contains invalid labels")
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl AsRef<str> for Route {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for Route {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Borrow<str> for Route {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RouteConfig {
+    pub upstream: String,
+    #[serde(default = "default_max_connections")]
+    pub max_concurrent_connections: usize,
+    #[serde(default)]
+    pub public_bypass: bool,
+    #[serde(default)]
+    pub tls_insecure_skip_verify: bool,
+    #[serde(default)]
+    pub individual_cert: bool,
+    #[serde(default)]
+    pub tls_cert_path: Option<String>,
+    #[serde(default)]
+    pub tls_key_path: Option<String>,
+    #[serde(default)]
+    pub allowed_asset_paths: Vec<CleanPath>,
+    #[serde(default)]
+    pub allowed_groups: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<Route>,
+}
+
+fn default_max_connections() -> usize {
+    256
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SidecarConfig {
+    #[serde(default)]
+    pub routes: HashMap<Route, RouteConfig>,
+    #[serde(default)]
+    pub forbidden_paths: Vec<String>,
+}
+
+pub async fn send_control(
+    stream: &mut quinn::SendStream,
+    msg: &ControlMessage,
+) -> anyhow::Result<()> {
+    let bytes = postcard::to_allocvec(msg)?;
+    stream.write_u16(bytes.len() as u16).await?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
+
+pub async fn recv_control(stream: &mut quinn::RecvStream) -> anyhow::Result<ControlMessage> {
+    let len = stream.read_u16().await? as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(postcard::from_bytes(&buf)?)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(from = "String", into = "String")]
+pub struct CleanPath(String);
+
+impl From<String> for CleanPath {
+    fn from(value: String) -> Self {
+        if value.starts_with('/') {
+            Self(value)
+        } else {
+            Self(format!("/{value}"))
+        }
+    }
+}
+
+impl From<CleanPath> for String {
+    fn from(value: CleanPath) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for CleanPath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Eq, PartialEq, Hash, Clone, Debug)]
+pub struct ShinshiName(String);
+
+impl FromStr for ShinshiName {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() || s.len() > 64 {
+            bail!("Sidecar name must be between 1 to 64 characters");
+        }
+        if !s.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+            bail!("Sidecar name must start with an alphanumeric character");
+        }
+        if !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            bail!("Sidecar name must conly contain alphanumeric characters, '_', and '-'");
+        }
+        Ok(Self(s.to_string()))
+    }
+}
+
+impl Display for ShinshiName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Borrow<str> for ShinshiName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ShinshiName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SidecarInit {
+    pub id: ShinshiName,
+    pub token: Vec<u8>,
+    pub fingerprint: [u8; 32],
+    pub server: TunnelEndpoint,
+}
+
+impl SidecarInit {
+    pub fn to_token(&self) -> anyhow::Result<String> {
+        let bytes = postcard::to_allocvec(self)?;
+        Ok(BASE64_URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    pub fn from_token(s: &str) -> anyhow::Result<Self> {
+        let bytes = BASE64_URL_SAFE_NO_PAD.decode(s)?;
+        Ok(postcard::from_bytes(&bytes)?)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TunnelEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+impl FromStr for TunnelEndpoint {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (host_str, port_str) = s
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("Endpoint must be in format host:port"))?;
+        let port = port_str.parse::<u16>()?;
+        let host = host_str.trim_end_matches(['[', ']']).to_string();
+        Ok(Self { host, port })
+    }
+}
+
+impl Display for TunnelEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
+}
+
+#[test]
+fn test_route_validation() {
+    assert!("example.com".parse::<Route>().is_ok());
+    assert!("api.sub.example.com".parse::<Route>().is_ok());
+    assert!("service-1.internal.net".parse::<Route>().is_ok());
+    assert!("*.example.com".parse::<Route>().is_err());
+    assert!("example.com/api".parse::<Route>().is_err());
+    assert!("localhost".parse::<Route>().is_err());
+    assert!("-bad.com".parse::<Route>().is_err());
+    assert!("".parse::<Route>().is_err());
+}
+
+#[test]
+fn test_shinshi_name_validation() {
+    assert!("auth_service".parse::<ShinshiName>().is_ok());
+    assert!("backend-1".parse::<ShinshiName>().is_ok());
+    assert!("edge01".parse::<ShinshiName>().is_ok());
+    assert!("a".parse::<ShinshiName>().is_ok());
+    assert!("".parse::<ShinshiName>().is_err());
+    assert!("-bad".parse::<ShinshiName>().is_err());
+    assert!("bad name!".parse::<ShinshiName>().is_err());
 }

@@ -1,19 +1,21 @@
 use arc_swap::ArcSwap;
-use axum::Router;
+use axum::{Router, http, response::IntoResponse};
+use http_body_util::BodyExt;
+use hyper::StatusCode;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
-use keidai::ConnectionEvent;
+use keidai::{ConnectionEvent, ShinshiName};
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{
-    net::TcpListener,
-};
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, error};
+
+use crate::{cli::config::ActiveState, proxy::sni::extract_sni};
 
 #[derive(Debug)]
 pub struct CertificateResolver {
@@ -46,14 +48,18 @@ impl ResolvesServerCert for CertificateResolver {
     }
 }
 
+// TCP HTTP connection server based on RFC 9112 and RFC 9113
 pub async fn serve(
     listener: TcpListener,
     routes: Router,
     acceptor: TlsAcceptor,
     event_tx: flume::Sender<ConnectionEvent>,
     cancel_token: CancellationToken,
+    handshake_limit: usize,
+    dynamic_config: Arc<ArcSwap<ActiveState>>,
+    sidecars: Arc<ArcSwap<HashMap<ShinshiName, quinn::Connection>>>,
 ) -> anyhow::Result<()> {
-    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(64));
+    let handshake_limiter = Arc::new(tokio::sync::Semaphore::new(handshake_limit));
     loop {
         let permit = tokio::select! {
             biased;
@@ -80,8 +86,65 @@ pub async fn serve(
         let tls_acceptor = acceptor.clone();
         let app = routes.clone();
         let tx = event_tx.clone();
+        let config = Arc::clone(&dynamic_config);
+        let tunnels = Arc::clone(&sidecars);
 
-        tokio::task::spawn(async move {
+        tokio::spawn(async move {
+            let mut peek_buf = [0u8; 1024];
+            let ch_bytes =
+                match tokio::time::timeout(Duration::from_secs(5), tcp_stream.peek(&mut peek_buf))
+                    .await
+                {
+                    Ok(Ok(ch_bytes)) => ch_bytes,
+                    _ => {
+                        drop(permit);
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "TCP",
+                        ));
+                        return;
+                    }
+                };
+            if let Some(domain) = extract_sni(&peek_buf[..ch_bytes]) {
+                let active = config.load();
+                if let Some(sidecar_id) = active.sidecar_routes.get(domain) {
+                    drop(permit);
+                    let sidecar_conn = tunnels.load().get(sidecar_id).cloned();
+                    if let Some(conn) = sidecar_conn {
+                        let Ok(Ok((mut quic_send, mut quic_recv))) =
+                            tokio::time::timeout(Duration::from_secs(3), conn.open_bi()).await
+                        else {
+                            let _ = tx.try_send(ConnectionEvent::new(
+                                0,
+                                502,
+                                "",
+                                remote_addr.ip(),
+                                "QUIC",
+                            ));
+                            return;
+                        };
+                        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+                        let _ = tokio::join!(
+                            tokio::io::copy(&mut tcp_read, &mut quic_send),
+                            tokio::io::copy(&mut quic_recv, &mut tcp_write)
+                        );
+                        return;
+                    } else {
+                        debug!("Sidecar '{sidecar_id}' for '{domain}' is offline");
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            503,
+                            "",
+                            remote_addr.ip(),
+                            "TCP",
+                        ));
+                        return;
+                    }
+                }
+            }
             let stream =
                 match tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
                     .await
@@ -90,10 +153,21 @@ pub async fn serve(
                         drop(permit);
                         stream
                     }
-                    _ => {
+                    Ok(Err(_)) => {
                         drop(permit);
                         let _ =
                             tx.try_send(ConnectionEvent::new(0, 400, "", remote_addr.ip(), "TLS"));
+                        return;
+                    }
+                    _ => {
+                        drop(permit);
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "TLS",
+                        ));
                         return;
                     }
                 };
@@ -123,8 +197,88 @@ pub async fn serve(
                     .header_read_timeout(Duration::from_secs(5))
                     .keep_alive(true);
                 if let Err(e) = http1.serve_connection(io, service).with_upgrades().await {
+                    if e.is_timeout() {
+                        let _ = tx.try_send(ConnectionEvent::new(
+                            5000,
+                            408,
+                            "",
+                            remote_addr.ip(),
+                            "HTTP",
+                        ));
+                    }
                     handle_connection_error(Box::new(e));
                 }
+            }
+        });
+    }
+    Ok(())
+}
+
+// UDP HTTP connection server based on RFC 9000 and RFC 9114
+pub async fn serve_h3(
+    endpoint: quinn::Endpoint,
+    routes: Router,
+    event_tx: flume::Sender<ConnectionEvent>,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
+    // a handshake_limiter may be useful (needs testing) but quic has built in protections (anti-amplification, retries)
+    loop {
+        let incoming = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => break,
+            conn = endpoint.accept() => {
+                match conn {
+                    Some(incoming) => incoming,
+                    None => break,
+                }
+            }
+        };
+        let app = routes.clone();
+        tokio::spawn(async move {
+            let connection = match incoming.await {
+                Ok(conn) => conn,
+                Err(_) => return,
+            };
+            let remote_addr = connection.remote_address();
+            let h3_quin_conn = h3_quinn::Connection::new(connection);
+            let Ok(mut h3_conn) = h3::server::Connection::new(h3_quin_conn).await else {
+                return;
+            };
+            while let Ok(Some(resolver)) = h3_conn.accept().await {
+                let mut app = app.clone();
+                tokio::spawn(async move {
+                    let Ok((req, mut stream)) = resolver.resolve_request().await else {
+                        return;
+                    };
+                    let (mut parts, ()) = req.into_parts();
+                    parts
+                        .extensions
+                        .insert(axum::extract::ConnectInfo(remote_addr));
+                    let request = axum::http::Request::from_parts(parts, axum::body::Body::empty());
+                    let response = match app.call(request).await {
+                        Ok(res) => res,
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    };
+                    let (parts, mut body) = response.into_parts();
+                    if let Err(e) = stream
+                        .send_response(http::Response::from_parts(parts, ()))
+                        .await
+                    {
+                        handle_connection_error(Box::new(e));
+                        return;
+                    }
+                    while let Some(Ok(frame)) = body.frame().await {
+                        if let Some(chunk) = frame.data_ref() {
+                            if let Err(e) = stream.send_data(chunk.clone()).await {
+                                handle_connection_error(Box::new(e));
+                                break;
+                            }
+                        }
+                    }
+                    if let Err(e) = stream.finish().await {
+                        handle_connection_error(Box::new(e));
+                    }
+                });
             }
         });
     }
@@ -150,8 +304,12 @@ fn handle_connection_error(e: Box<dyn std::error::Error + Send + Sync>) {
             )
         })
         .unwrap_or(false);
-
-    if is_client_disconnect || is_io_disconnect {
+    let is_h3_disconnect = if let Some(error) = e.downcast_ref::<h3::error::StreamError>() {
+        matches!(error, h3::error::StreamError::RemoteTerminate { .. }) || error.is_h3_no_error()
+    } else {
+        false
+    };
+    if is_client_disconnect || is_io_disconnect || is_h3_disconnect {
         debug!("Client disconnected early: {}", e);
     } else {
         error!("Failed to serve connection: {}", e)

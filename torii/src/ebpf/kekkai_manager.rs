@@ -129,7 +129,7 @@ impl FromStr for Ipv6Prefix {
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum IpPrefix {
     V4(Ipv4Prefix),
     V6(Ipv6Prefix),
@@ -365,8 +365,7 @@ pub async fn run(
         error!("FATAL: Failed to initialize eBPF map BLOCKLIST_V4_PREFIX from kekkai");
         std::process::exit(1);
     };
-    let Ok(blocklist_v4_prefix) = LpmTrie::<_, u32, u8>::try_from(blocklist_v4_prefix_raw)
-    else {
+    let Ok(blocklist_v4_prefix) = LpmTrie::<_, u32, u8>::try_from(blocklist_v4_prefix_raw) else {
         error!("FATAL: Failed to extract eBPF map BLOCKLIST_V4_PREFIX from memory");
         std::process::exit(1);
     };

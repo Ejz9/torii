@@ -15,6 +15,7 @@ use anyhow::Context;
 use axum::routing::any;
 use clap::Parser;
 use keidai::ConnectionEvent;
+use quinn::crypto::rustls::QuicServerConfig;
 use rustls::ServerConfig;
 use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::server::ServerSessionMemoryCache;
@@ -28,6 +29,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use toml::from_str;
+use tracing::warn;
 use tracing::{Level, error, info};
 use tracing_subscriber::FmtSubscriber;
 
@@ -40,19 +42,22 @@ use crate::cli::config::ToriiConfig;
 use crate::cli::socket;
 use crate::cli::socket::SocketMessage;
 use crate::cli::socket::send_socket_message;
-use crate::cli::socket::validate_ips;
 use crate::ebpf::hashira::EbpfEntry;
 use crate::ebpf::kekkai_manager;
 use crate::ebpf::ofuda::OfudaEntry;
 use crate::env::Config;
 use crate::proxy::middleware::temizuya;
 use crate::proxy::router::handle_any;
+use crate::proxy::server::serve_h3;
 use crate::proxy::server::{CertificateResolver, serve};
 use crate::state::AppState;
+use crate::tunnel::sando;
 use crate::{auth::oidc::auth_redirect, proxy::middleware::enforce_auth};
 use axum::{Router, middleware};
 use dotenvy;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -101,12 +106,14 @@ async fn main() -> anyhow::Result<()> {
             };
             let (hashira_tx, hashira_rx) = tokio::sync::mpsc::channel::<EbpfEntry>(10_000);
             let (event_tx, event_rx) = flume::bounded::<ConnectionEvent>(10_000);
+            let (config_reload_tx, _) = tokio::sync::broadcast::channel::<()>(1);
             let state = Arc::new(
                 AppState::new(
                     config,
                     cli.config,
                     acme_tx.clone(),
                     event_tx.clone(),
+                    config_reload_tx.clone(),
                     root_keypair,
                 )
                 .await
@@ -127,12 +134,11 @@ async fn main() -> anyhow::Result<()> {
                 worker_token.clone(),
             ));
             worker_set.spawn(socket::listener(
-                Arc::clone(&state.dynamic_config),
-                Arc::clone(&state.cert_verifier),
+                state.clone(),
+                config_reload_tx,
                 acme_tx,
                 ofuda_tx,
                 mihari_notify.clone(),
-                state.config.kekkai_path.clone(),
                 worker_token.clone(),
             ));
             if let (Some(acme_provider), Some(acme_rx)) =
@@ -152,10 +158,10 @@ async fn main() -> anyhow::Result<()> {
                     ));
                 }
             }
+            worker_set.spawn(sando::listener(network_token.clone(), state.clone()));
             if let Some(endpoints) = &state.endpoints {
                 fetch_jwks(&endpoints, &state.jwks_cache).await?;
             }
-            let addr = format!("{}:{}", state.config.host, state.config.port);
             let private_routes = Router::new()
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
@@ -179,18 +185,29 @@ async fn main() -> anyhow::Result<()> {
             config.session_storage = ServerSessionMemoryCache::new(20_000);
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let acceptor = TlsAcceptor::from(Arc::new(config));
-            let socket_addr: SocketAddr = addr.parse()?;
+            let mut h3_tls = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(Arc::new(CertificateResolver::new(Arc::clone(
+                    &state.certificates,
+                ))));
+            h3_tls.alpn_protocols = vec![b"h3".to_vec()];
+            let quic_crypto = QuicServerConfig::try_from(h3_tls)?;
+            let quinn_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
+            let socket_addr = match state.config.host {
+                IpAddr::V6(_) if TcpSocket::new_v6().is_err() => {
+                    warn!("IPv6 unsupported by kernel, falling back to 0.0.0.0");
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), state.config.port)
+                }
+                host => SocketAddr::new(host, state.config.port),
+            };
+
             let nr_cpus = std::thread::available_parallelism()?.get();
             let mut servers = Vec::new();
+            let handshake_limit = (nr_cpus * 128).clamp(256, 1024);
             for _ in 0..nr_cpus {
-                let socket_addr = socket_addr;
-                let app = app.clone();
-                let acceptor = acceptor.clone();
-                let event_tx = event_tx.clone();
-                let network_token = network_token.clone();
                 let socket = match socket_addr {
-                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
                     SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
                 };
                 socket.set_reuseaddr(true)?;
                 socket.set_reuseport(true)?;
@@ -212,13 +229,20 @@ async fn main() -> anyhow::Result<()> {
                     acceptor.clone(),
                     event_tx.clone(),
                     network_token.clone(),
+                    handshake_limit,
+                    state.dynamic_config.clone(),
+                    state.sidecars.clone(),
                 )));
             }
-            info!("Listening on {} across {} listeners...", addr, nr_cpus);
+            let h3_listener = quinn::Endpoint::server(quinn_config, socket_addr)?;
+            servers.push(tokio::spawn(serve_h3(
+                h3_listener,
+                app.clone(),
+                event_tx.clone(),
+                network_token.clone(),
+            )));
+            info!("Listening on {socket_addr} across {nr_cpus} listeners...");
 
-            // Add hashira use in the main server worker or for specialized / auth endpoints.
-            // Otherwise leave add to eBPF but should be good to move on to sidecar and http/3
-            // can also setup internal JWT for use instead of UUID. Sidecars check this to trust traffic came from torii
             select! {
                 _ = tokio::signal::ctrl_c() => {}
                 Some(result) = worker_set.join_next() => {
@@ -270,11 +294,6 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .context("FATAL: Daemon failed to retrieve ban list")?;
             } else {
-                let invalid_add_entries = validate_ips(&bans_args.add);
-                let invalid_remove_entries = validate_ips(&bans_args.remove);
-                if invalid_add_entries || invalid_remove_entries {
-                    std::process::exit(1);
-                }
                 send_socket_message(SocketMessage::UpdateBans(bans_args))
                     .await
                     .context("FATAL: Daemon rejected ban modifications")?;
@@ -286,6 +305,11 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("FATAL: Daemon failed to communicate with mihari worker thread")?;
             println!("Mhiari threat worker refreshed");
+        }
+        Commands::Tunnel(tunnel_args) => {
+            send_socket_message(SocketMessage::TunnelInit(tunnel_args))
+                .await
+                .context("FATAL: Daemon rejected tunnel parameters")?;
         }
     }
     std::process::exit(0);

@@ -1,4 +1,4 @@
-use keidai::ConnectionEvent;
+use keidai::{ConnectionEvent, ShinshiName};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,6 +8,7 @@ use crate::auth::oidc::Endpoints;
 use crate::cli::config::ActiveState;
 use crate::env::Config;
 use crate::error::Error;
+use crate::tunnel::sando::load_or_generate_tunnel_cert;
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
@@ -21,7 +22,7 @@ use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
 use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, RootCertStore, pki_types};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types};
 use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::info;
@@ -37,8 +38,12 @@ pub struct AppState {
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub cert_verifier: Arc<WebPkiServerVerifier>,
     pub certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
+    pub sidecars: Arc<ArcSwap<HashMap<ShinshiName, quinn::Connection>>>,
     pub event_tx: flume::Sender<ConnectionEvent>,
     pub root_keypair: biscuit_auth::KeyPair,
+    pub tunnel_config: ServerConfig,
+    pub tunnel_fingerprint: [u8; 32],
+    pub config_reload_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 const DEFAULT_CONFIG_STRING: &str = r#"
@@ -46,7 +51,7 @@ const DEFAULT_CONFIG_STRING: &str = r#"
 
 [security]
 # Determines if the proxy opts for wildcard certificates or individual certificates
-default_certificate_mode_wildcard = true
+default_certificate_mode_wildcard = false
 # Paths an IP will be blocked for accessing
 forbidden_paths: ["../", "%2e%2e", "/.env", "/cgi-bin/", "${"]
 # The number of malicious requests before the kernel drops the IP at the NIC
@@ -78,6 +83,7 @@ impl AppState {
             )>,
         >,
         event_tx: flume::Sender<ConnectionEvent>,
+        config_reload_tx: tokio::sync::broadcast::Sender<()>,
         root_keypair: biscuit_auth::KeyPair,
     ) -> Result<Self, Error> {
         let endpoints = if let Some(oidc_provider) = &config.oidc_provider {
@@ -147,6 +153,8 @@ impl AppState {
                 .await;
         }
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
+        let sidecars = Arc::new(ArcSwap::from_pointee(HashMap::new()));
+        let (tunnel_config, tunnel_fingerprint) = load_or_generate_tunnel_cert(&config.sando_path)?;
         let mut http = HttpConnector::new();
         http.set_nodelay(true);
         http.set_keepalive(Some(Duration::from_secs(60)));
@@ -185,7 +193,11 @@ impl AppState {
             insecure_connection_pool,
             cert_verifier,
             certificates,
+            sidecars,
             event_tx,
+            tunnel_config,
+            tunnel_fingerprint,
+            config_reload_tx,
             root_keypair,
         })
     }
