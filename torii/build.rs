@@ -1,4 +1,3 @@
-#[cfg(feature = "ebpf")]
 fn main() -> anyhow::Result<()> {
     use anyhow::{Context as _, anyhow};
     use aya_build::Toolchain;
@@ -25,6 +24,3 @@ fn main() -> anyhow::Result<()> {
     };
     aya_build::build_ebpf([ebpf_package], Toolchain::default())
 }
-
-#[cfg(not(feature = "ebpf"))]
-fn main() {}

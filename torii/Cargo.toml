@@ -7,8 +7,8 @@ edition.workspace = true
 arc-swap = "1.9.1"
 aws-lc-rs = "1.17.0"
 axum = "0.8.9"
-aya = { workspace = true, optional = true }
-aya-log = { workspace = true, optional = true }
+aya = { workspace = true }
+aya-log = { workspace = true }
 clap = { version = "4.6.1", features = ["derive"] }
 dotenvy = "0.15.7"
 hyper = "1.10.0"
@@ -59,16 +59,6 @@ base64 = { workspace = true }
 http-body-util = "0.1.5"
 
 [build-dependencies]
-anyhow = { workspace = true, optional = true }
-aya-build = { workspace = true, optional = true }
-cargo_metadata = { workspace = true, optional = true }
-
-[features]
-default = []
-ebpf = [
-    "dep:aya",
-    "dep:aya-log",
-    "dep:anyhow",
-    "dep:aya-build",
-    "dep:cargo_metadata",
-]
+anyhow = { workspace = true }
+aya-build = { workspace = true }
+cargo_metadata = { workspace = true }
