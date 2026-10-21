@@ -424,11 +424,7 @@ async fn solve_dns_challenge(
     Ok(())
 }
 
-pub async fn sign_csr(
-    state: &AppState,
-    domain: String,
-    csr_der: &[u8],
-) -> Result<String, Error> {
+pub async fn sign_csr(state: &AppState, domain: String, csr_der: &[u8]) -> Result<String, Error> {
     let Some(acme_provider) = &state.config.acme_provider else {
         return Err(Error::InvalidCustomSetup(
             "ACME provider not configured".to_string(),

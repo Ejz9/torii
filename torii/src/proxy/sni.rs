@@ -34,6 +34,7 @@ impl<'a> Reader<'a> {
         self.take(len).map(Self::new)
     }
 
+    #[allow(dead_code)]
     pub fn sub_u8_len(&mut self) -> Option<Self> {
         let len = self.read_u8()? as usize;
         self.sub(len)
@@ -63,6 +64,7 @@ impl<'a> Reader<'a> {
         self.skip(len)
     }
 
+    #[allow(dead_code)]
     pub fn skip_u24_len(&mut self) -> Option<()> {
         let len = self.read_u24()? as usize;
         self.skip(len)

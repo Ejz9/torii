@@ -238,7 +238,6 @@ async fn main() -> anyhow::Result<()> {
             servers.push(tokio::spawn(serve_h3(
                 h3_listener,
                 app.clone(),
-                event_tx.clone(),
                 network_token.clone(),
             )));
             info!("Listening on {socket_addr} across {nr_cpus} listeners...");

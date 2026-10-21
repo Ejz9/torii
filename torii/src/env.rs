@@ -37,9 +37,7 @@ impl Config {
         let quic_event_port = var("QUIC_EVENT_PORT")
             .unwrap_or_else(|_| "10000".to_string())
             .parse()?;
-        let host = var("HOST")
-            .unwrap_or_else(|_| "::".to_string())
-            .parse()?;
+        let host = var("HOST").unwrap_or_else(|_| "::".to_string()).parse()?;
         let oidc_issuer_url = var("OIDC_ISSUER_URL").ok();
         let oidc_client_id = var("OIDC_CLIENT_ID").ok();
         let oidc_client_secret = var("OIDC_CLIENT_SECRET").ok();

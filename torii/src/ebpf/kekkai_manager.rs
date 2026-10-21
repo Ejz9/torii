@@ -478,6 +478,7 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
             warn!("failed to initialize eBPF logger: {e}");
         }
         Ok(logger) => {
+            #[expect(deprecated)]
             let mut logger =
                 tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
             tokio::task::spawn(async move {

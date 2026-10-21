@@ -218,7 +218,6 @@ pub async fn serve(
 pub async fn serve_h3(
     endpoint: quinn::Endpoint,
     routes: Router,
-    event_tx: flume::Sender<ConnectionEvent>,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     // a handshake_limiter may be useful (needs testing) but quic has built in protections (anti-amplification, retries)
