@@ -3038,6 +3038,21 @@ dependencies = [
 [[package]]
 name = "shinshi"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "axum",
+ "clap",
+ "keidai",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "shlex"

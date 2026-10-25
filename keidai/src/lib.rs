@@ -262,7 +262,7 @@ impl ShinshiName {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SidecarInit {
     pub id: ShinshiName,
     pub token: Vec<u8>,
@@ -279,6 +279,14 @@ impl SidecarInit {
     pub fn from_token(s: &str) -> anyhow::Result<Self> {
         let bytes = BASE64_URL_SAFE_NO_PAD.decode(s)?;
         Ok(postcard::from_bytes(&bytes)?)
+    }
+}
+
+impl FromStr for SidecarInit {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_token(s)
     }
 }
 
