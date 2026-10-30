@@ -19,6 +19,12 @@ pub struct StartArgs {
     pub token: Option<SidecarInit>,
     #[arg(long, default_value = "/etc/shinshi/token")]
     pub token_file: std::path::PathBuf,
+    #[arg(
+        long,
+        env = "SHINSHI_CERT_DIR",
+        default_value = "/var/lib/shinshi/certs"
+    )]
+    pub cert_dir: std::path::PathBuf,
 }
 
 impl StartArgs {
