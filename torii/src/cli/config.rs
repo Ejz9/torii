@@ -9,15 +9,12 @@ use std::{
 
 use aho_corasick::AhoCorasick;
 use axum::http;
-use keidai::{CleanPath, Route, RouteConfig, ShinshiName, SidecarConfig};
+use keidai::{CleanPath, Route, RouteConfig, ShinshiName, SidecarConfig, parse_certificate};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{
-    acme::dns::{parse_certificate, verify_certificate_signature},
-    error::Error,
-};
+use crate::{acme::dns::verify_certificate_signature, error::Error};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]

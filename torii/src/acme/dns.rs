@@ -2,11 +2,11 @@ use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, Order,
     OrderStatus, RetryPolicy,
 };
+use keidai::parse_certificate;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
-use rustls::crypto;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{PrivateKeyDer, ServerName, UnixTime};
+use rustls::pki_types::{ServerName, UnixTime};
 use rustls::{pki_types::CertificateDer, sign::CertifiedKey};
 use std::collections::HashMap;
 use std::{
@@ -436,17 +436,6 @@ pub async fn sign_csr(state: &AppState, domain: String, csr_der: &[u8]) -> Resul
     solve_dns_challenge(&mut order, acme_provider, domain).await?;
     order.finalize_csr(csr_der).await?;
     Ok(order.poll_certificate(&RetryPolicy::default()).await?)
-}
-
-pub fn parse_certificate(
-    private_key_bytes: Vec<u8>,
-    cert_chain_bytes: Vec<u8>,
-) -> Result<Arc<CertifiedKey>, Error> {
-    let key = PrivateKeyDer::from_pem_slice(&private_key_bytes)?;
-    let chain: Vec<CertificateDer> =
-        CertificateDer::pem_slice_iter(&cert_chain_bytes).collect::<Result<Vec<_>, _>>()?;
-    let signing_key = crypto::aws_lc_rs::sign::any_supported_type(&key)?;
-    Ok(Arc::new(CertifiedKey::new(chain, signing_key)))
 }
 
 pub fn verify_certificate_signature(

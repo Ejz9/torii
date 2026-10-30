@@ -160,6 +160,7 @@ async fn handle_sidecar(
     let msg = ControlMessage::SyncConfig(SidecarConfig {
         routes: sidecar_cfg.routes.clone(),
         forbidden_paths: active.security.forbidden_paths.clone(),
+        root_public_key: state.root_keypair.public().into(),
     });
     send_control(&mut send_stream, &msg).await?;
 
@@ -197,6 +198,7 @@ async fn handle_sidecar(
                     let msg = ControlMessage::SyncConfig(SidecarConfig {
                         routes: config.routes.clone(),
                         forbidden_paths: dynamic_config.security.forbidden_paths.clone(),
+                        root_public_key: state.root_keypair.public().into()
                     });
                     if let Err(e) = send_control(&mut send_stream, &msg).await {
                         error!("Failed to send reloaded config to sidecar '{id}': {e}");

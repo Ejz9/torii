@@ -79,6 +79,8 @@ pub enum Error {
     TokenFormat(#[from] biscuit_auth::error::Format),
     #[error(transparent)]
     InvalidToken(#[from] biscuit_auth::error::Token),
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
 }
 
 impl IntoResponse for Error {
