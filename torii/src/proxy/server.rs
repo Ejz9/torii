@@ -8,8 +8,8 @@ use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::net::TcpListener;
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
@@ -90,7 +90,7 @@ pub async fn serve(
         let tunnels = Arc::clone(&sidecars);
 
         tokio::spawn(async move {
-            let mut peek_buf = [0u8; 1024];
+            let mut peek_buf = [0u8; 4096];
             let ch_bytes =
                 match tokio::time::timeout(Duration::from_secs(5), tcp_stream.peek(&mut peek_buf))
                     .await
@@ -126,6 +126,21 @@ pub async fn serve(
                             ));
                             return;
                         };
+                        let ip_bytes = match remote_addr.ip() {
+                            IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                            IpAddr::V6(v6) => v6.octets(),
+                        };
+                        if quic_send.write_all(&ip_bytes).await.is_err()
+                            || quic_send.write_u16(remote_addr.port()).await.is_err()
+                        {
+                            let _ = tx.try_send(ConnectionEvent::new(
+                                0,
+                                502,
+                                "",
+                                remote_addr.ip(),
+                                "QUIC",
+                            ));
+                        }
                         let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
                         let _ = tokio::join!(
                             tokio::io::copy(&mut tcp_read, &mut quic_send),
