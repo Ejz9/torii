@@ -1,7 +1,7 @@
 use aws_lc_rs::digest;
 use biscuit_auth::{Biscuit, macros::authorizer};
 use keidai::{
-    ConnectionEvent, ControlMessage, ShinshiName, SidecarConfig, recv_control, send_control,
+    ConnectionEvent, ControlMessage, ShinshiConfig, ShinshiName, recv_control, send_control,
 };
 use log::warn;
 use quinn::crypto::rustls::QuicServerConfig;
@@ -19,7 +19,6 @@ use std::{
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
-use zerocopy::IntoBytes;
 
 use crate::{acme::dns::sign_csr, error::Error, state::AppState};
 
@@ -156,11 +155,12 @@ async fn handle_sidecar(
         connection.close(404_u32.into(), b"no routes configured");
         anyhow::bail!("No configuration found for sidecar '{id}'");
     };
-
-    let msg = ControlMessage::SyncConfig(SidecarConfig {
-        routes: sidecar_cfg.routes.clone(),
-        forbidden_paths: active.security.forbidden_paths.clone(),
-    });
+    let root_public_key = if state.config.oidc_provider.is_some() {
+        Some(state.root_keypair.public().into())
+    } else {
+        None
+    };
+    let msg = ControlMessage::SyncConfig(ShinshiConfig::new(sidecar_cfg.clone(), root_public_key));
     send_control(&mut send_stream, &msg).await?;
 
     loop {
@@ -194,10 +194,15 @@ async fn handle_sidecar(
             Ok(()) = reload_rx.recv() => {
                 let dynamic_config = state.dynamic_config.load();
                 if let Some(config) = dynamic_config.sidecars.get(id.as_str()) {
-                    let msg = ControlMessage::SyncConfig(SidecarConfig {
-                        routes: config.routes.clone(),
-                        forbidden_paths: dynamic_config.security.forbidden_paths.clone(),
-                    });
+                    let root_public_key = if state.config.oidc_provider.is_some() {
+                        Some(state.root_keypair.public().into())
+                    } else {
+                        None
+                    };
+                    let msg = ControlMessage::SyncConfig(ShinshiConfig::new(
+                        config.clone(),
+                        root_public_key,
+                    ));
                     if let Err(e) = send_control(&mut send_stream, &msg).await {
                         error!("Failed to send reloaded config to sidecar '{id}': {e}");
                         break;
@@ -225,9 +230,10 @@ async fn handle_sidecar(
 
     debug!("Sidecar {id} disconnected, unregistering...");
     let mut map = (**state.sidecars.load()).clone();
-    map.remove(&id);
-    state.sidecars.store(Arc::new(map));
-
+    if map.get(&id).map(|c| c.stable_id()) == Some(connection.stable_id()) {
+        map.remove(&id);
+        state.sidecars.store(Arc::new(map));
+    }
     Ok(())
 }
 

@@ -108,7 +108,7 @@ fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), target_arch = "bpf"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

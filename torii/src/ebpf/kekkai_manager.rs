@@ -442,12 +442,9 @@ pub async fn run(
         }
     }
     info!("Kekkai completed shutdown. Detaching eBPF program...");
-    #[cfg(not(feature = "ebpf"))]
-    info!("Kekkai disabled");
     Ok(())
 }
 
-#[cfg(feature = "ebpf")]
 async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
     use anyhow::Context as _;
     use aya::programs::{Xdp, XdpMode};
@@ -478,6 +475,7 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
             warn!("failed to initialize eBPF logger: {e}");
         }
         Ok(logger) => {
+            #[expect(deprecated)]
             let mut logger =
                 tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
             tokio::task::spawn(async move {
@@ -502,10 +500,4 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
 
     log::info!("Kekkai eBPF successfully attached to {}", iface);
     Ok(ebpf)
-}
-
-#[cfg(not(feature = "ebpf"))]
-pub async fn init_ebpf(_iface: &str) -> anyhow::Result<()> {
-    log::info!("Kekkai eBPF disabled");
-    Ok(())
 }

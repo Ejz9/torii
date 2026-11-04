@@ -17,6 +17,7 @@ pub async fn handle_any(
     mut req: Request<Body>,
 ) -> Result<impl IntoResponse, Error> {
     let source_ip = &ip.ip();
+    let client_version = req.version();
     let upgrade_intent = req.extensions_mut().remove::<hyper::upgrade::OnUpgrade>();
     let (mut parts, body) = req.into_parts();
     let host_str = parts
@@ -127,14 +128,18 @@ pub async fn handle_any(
                 headers.remove(hyper::header::UPGRADE);
                 headers.remove(hyper::header::TRANSFER_ENCODING);
                 headers.remove(HeaderName::from_static("proxy-connection"));
-                headers.insert(
-                    hyper::header::CONNECTION,
-                    HeaderValue::from_static("keep-alive"),
-                );
-                headers.insert(
-                    HeaderName::from_static("keep-alive"),
-                    HeaderValue::from_static("timeout=65"),
-                );
+                headers.remove(hyper::header::CONNECTION);
+                headers.remove(HeaderName::from_static("keep-alive"));
+                if client_version < hyper::Version::HTTP_2 {
+                    headers.insert(
+                        hyper::header::CONNECTION,
+                        HeaderValue::from_static("keep-alive"),
+                    );
+                    headers.insert(
+                        HeaderName::from_static("keep-alive"),
+                        HeaderValue::from_static("timeout=65"),
+                    );
+                }
             }
             Ok(res.map(|body| Body::new(body)).into_response())
         }
