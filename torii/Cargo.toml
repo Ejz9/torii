@@ -25,13 +25,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2.0.18"
 tokio = { workspace = true }
-tokio-rustls = "0.26.4"
+tokio-rustls = { workspace = true }
 toml = "1.1.2"
 tower = "0.5.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-log = "0.2.0"
-url = "2.5.8"
+url = { workspace = true }
 uuid = { version = "1.23.1", features = ["v4"] }
 webpki-roots = "1.0.8"
 x509-parser = { workspace = true }
@@ -49,7 +49,7 @@ tokio-util = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 biscuit-auth = { workspace = true }
-mimalloc = { version = "0.1.52", default-features = false }
+mimalloc = { workspace = true }
 flume = { workspace = true }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"

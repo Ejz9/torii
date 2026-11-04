@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
-use keidai::{ControlMessage, SidecarConfig, SidecarInit, recv_control, send_control};
+use keidai::{ControlMessage, ShinshiConfig, SidecarInit, recv_control, send_control};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::sign::CertifiedKey;
 use tokio::{net::lookup_host, time::Instant};
@@ -17,7 +17,10 @@ pub async fn connect_gateway(init: &SidecarInit) -> anyhow::Result<quinn::Connec
         .with_no_client_auth();
     rustls_config.alpn_protocols = vec![b"torii-tunnel".to_vec()];
     let quinn_crypto = QuicClientConfig::try_from(rustls_config)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quinn_crypto));
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn_crypto));
+    client_config.transport_config(Arc::new(transport));
     let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0; 16], 0)))
         .or_else(|_| quinn::Endpoint::client(SocketAddr::from(([0; 4], 0))))?;
     endpoint.set_default_client_config(client_config);
@@ -36,7 +39,7 @@ pub async fn handshake_gateway(
 ) -> anyhow::Result<(
     quinn::SendStream,
     quinn::RecvStream,
-    SidecarConfig,
+    ShinshiConfig,
     HashMap<String, Arc<CertifiedKey>>,
     quinn::SendStream,
     Duration,

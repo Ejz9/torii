@@ -8,8 +8,7 @@ use std::{
 };
 
 use aho_corasick::AhoCorasick;
-use axum::http;
-use keidai::{CleanPath, Route, RouteConfig, ShinshiName, SidecarConfig, parse_certificate};
+use keidai::{ActiveRoute, Route, RouteConfig, ShinshiName, SidecarConfig, parse_certificate};
 use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -310,57 +309,6 @@ fn ebpf_velocity_threshhold() -> u64 {
 }
 fn ebpf_lockout_duration_secs() -> u64 {
     3600
-}
-
-#[derive(Clone)]
-pub struct ActiveRoute {
-    pub upstream: http::Uri,
-    pub upstream_limiter: Arc<tokio::sync::Semaphore>,
-    pub upstream_scheme: Option<http::uri::Scheme>,
-    pub upstream_authority: Option<http::uri::Authority>,
-    pub upstream_host_header: http::HeaderValue,
-    pub public_bypass: bool,
-    pub tls_insecure_skip_verify: bool,
-    pub allowed_asset_paths: Vec<CleanPath>,
-    pub allowed_groups_datalog_policy: String,
-}
-
-impl TryFrom<RouteConfig> for ActiveRoute {
-    type Error = Error;
-    fn try_from(config: RouteConfig) -> Result<Self, Self::Error> {
-        let upstream: http::Uri = config.upstream.parse()?;
-        let upstream_scheme = upstream.scheme().cloned();
-        let upstream_authority = upstream.authority().cloned();
-        let upstream_host_str = upstream
-            .authority()
-            .map(|a| a.as_str())
-            .unwrap_or("localhost");
-        let upstream_host_header = http::HeaderValue::from_str(upstream_host_str)?;
-        let upstream_limiter = Arc::new(tokio::sync::Semaphore::new(
-            config.max_concurrent_connections,
-        ));
-        let allowed_groups_datalog_policy = if config.allowed_groups.is_empty() {
-            "allow if true;".to_string()
-        } else {
-            config
-                .allowed_groups
-                .iter()
-                .map(|g| format!("allow if group(\"{g}\");"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        Ok(ActiveRoute {
-            upstream,
-            upstream_limiter,
-            upstream_scheme,
-            upstream_authority,
-            upstream_host_header,
-            public_bypass: config.public_bypass,
-            tls_insecure_skip_verify: config.tls_insecure_skip_verify,
-            allowed_asset_paths: config.allowed_asset_paths,
-            allowed_groups_datalog_policy,
-        })
-    }
 }
 
 pub enum DomainTier {

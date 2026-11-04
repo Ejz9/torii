@@ -49,6 +49,14 @@ impl ConnectionEvent {
         }
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        zerocopy::IntoBytes::as_bytes(self)
+    }
+
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        zerocopy::IntoBytes::as_mut_bytes(self)
+    }
+
     pub fn new(
         latency_ms: u32,
         status_code: u16,
@@ -82,7 +90,7 @@ impl ConnectionEvent {
 #[derive(Serialize, Deserialize)]
 pub enum ControlMessage {
     Auth { token: Vec<u8> },
-    SyncConfig(SidecarConfig),
+    SyncConfig(ShinshiConfig),
     CertRequest { domain: String, csr: Vec<u8> },
     CertResponse { domain: String, cert_chain: String },
     CertError { domain: String, error: String },
@@ -176,7 +184,58 @@ fn default_max_connections() -> usize {
     256
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Clone)]
+pub struct ActiveRoute {
+    pub upstream: http::Uri,
+    pub upstream_limiter: Arc<tokio::sync::Semaphore>,
+    pub upstream_scheme: Option<http::uri::Scheme>,
+    pub upstream_authority: Option<http::uri::Authority>,
+    pub upstream_host_header: http::HeaderValue,
+    pub public_bypass: bool,
+    pub tls_insecure_skip_verify: bool,
+    pub allowed_asset_paths: Vec<CleanPath>,
+    pub allowed_groups_datalog_policy: String,
+}
+
+impl TryFrom<RouteConfig> for ActiveRoute {
+    type Error = anyhow::Error;
+    fn try_from(config: RouteConfig) -> Result<Self, Self::Error> {
+        let upstream: http::Uri = config.upstream.parse()?;
+        let upstream_scheme = upstream.scheme().cloned();
+        let upstream_authority = upstream.authority().cloned();
+        let upstream_host_str = upstream
+            .authority()
+            .map(|a| a.as_str())
+            .unwrap_or("localhost");
+        let upstream_host_header = http::HeaderValue::from_str(upstream_host_str)?;
+        let upstream_limiter = Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_connections,
+        ));
+        let allowed_groups_datalog_policy = if config.allowed_groups.is_empty() {
+            "allow if true;".to_string()
+        } else {
+            config
+                .allowed_groups
+                .iter()
+                .map(|g| format!("allow if group(\"{g}\");"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        Ok(ActiveRoute {
+            upstream,
+            upstream_limiter,
+            upstream_scheme,
+            upstream_authority,
+            upstream_host_header,
+            public_bypass: config.public_bypass,
+            tls_insecure_skip_verify: config.tls_insecure_skip_verify,
+            allowed_asset_paths: config.allowed_asset_paths,
+            allowed_groups_datalog_policy,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct BiscuitPublicKey(pub [u8; 32]);
 
 impl From<biscuit_auth::PublicKey> for BiscuitPublicKey {
@@ -199,12 +258,29 @@ impl TryFrom<BiscuitPublicKey> for biscuit_auth::PublicKey {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SidecarConfig {
     #[serde(default)]
     pub routes: HashMap<Route, RouteConfig>,
     #[serde(default)]
     pub forbidden_paths: Vec<String>,
-    pub root_public_key: BiscuitPublicKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShinshiConfig {
+    pub routes: HashMap<Route, RouteConfig>,
+    pub forbidden_paths: Vec<String>,
+    pub root_public_key: Option<BiscuitPublicKey>,
+}
+
+impl ShinshiConfig {
+    pub fn new(config: SidecarConfig, root_public_key: Option<BiscuitPublicKey>) -> Self {
+        Self {
+            routes: config.routes,
+            forbidden_paths: config.forbidden_paths,
+            root_public_key,
+        }
+    }
 }
 
 pub async fn send_control(
