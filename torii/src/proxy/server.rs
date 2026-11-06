@@ -89,11 +89,16 @@ pub async fn serve(
         let config = Arc::clone(&dynamic_config);
         let tunnels = Arc::clone(&sidecars);
 
+        let active = config.load();
+
         tokio::spawn(async move {
-            let mut peek_buf = [0u8; 4096];
-            let ch_bytes =
-                match tokio::time::timeout(Duration::from_secs(5), tcp_stream.peek(&mut peek_buf))
-                    .await
+            if !active.sidecar_routes.is_empty() {
+                let mut peek_buf = [0u8; 4096];
+                let ch_bytes = match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tcp_stream.peek(&mut peek_buf),
+                )
+                .await
                 {
                     Ok(Ok(ch_bytes)) => ch_bytes,
                     _ => {
@@ -108,58 +113,60 @@ pub async fn serve(
                         return;
                     }
                 };
-            if let Some(domain) = extract_sni(&peek_buf[..ch_bytes]) {
-                let active = config.load();
-                if let Some(sidecar_id) = active.sidecar_routes.get(domain) {
-                    drop(permit);
-                    let sidecar_conn = tunnels.load().get(sidecar_id).cloned();
-                    if let Some(conn) = sidecar_conn {
-                        let Ok(Ok((mut quic_send, mut quic_recv))) =
-                            tokio::time::timeout(Duration::from_secs(3), conn.open_bi()).await
-                        else {
+                if let Some(domain) = extract_sni(&peek_buf[..ch_bytes]) {
+                    let active = config.load();
+                    if let Some(sidecar_id) = active.sidecar_routes.get(domain) {
+                        drop(permit);
+                        let sidecar_conn = tunnels.load().get(sidecar_id).cloned();
+                        if let Some(conn) = sidecar_conn {
+                            let Ok(Ok((mut quic_send, mut quic_recv))) =
+                                tokio::time::timeout(Duration::from_secs(3), conn.open_bi()).await
+                            else {
+                                let _ = tx.try_send(ConnectionEvent::new(
+                                    0,
+                                    502,
+                                    "",
+                                    remote_addr.ip(),
+                                    "QUIC",
+                                ));
+                                return;
+                            };
+                            let ip_bytes = match remote_addr.ip() {
+                                IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
+                                IpAddr::V6(v6) => v6.octets(),
+                            };
+                            if quic_send.write_all(&ip_bytes).await.is_err()
+                                || quic_send.write_u16(remote_addr.port()).await.is_err()
+                            {
+                                let _ = tx.try_send(ConnectionEvent::new(
+                                    0,
+                                    502,
+                                    "",
+                                    remote_addr.ip(),
+                                    "QUIC",
+                                ));
+                            }
+                            let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+                            let _ = tokio::join!(
+                                tokio::io::copy(&mut tcp_read, &mut quic_send),
+                                tokio::io::copy(&mut quic_recv, &mut tcp_write)
+                            );
+                            return;
+                        } else {
+                            debug!("Sidecar '{sidecar_id}' for '{domain}' is offline");
                             let _ = tx.try_send(ConnectionEvent::new(
-                                0,
-                                502,
+                                5000,
+                                503,
                                 "",
                                 remote_addr.ip(),
-                                "QUIC",
+                                "TCP",
                             ));
                             return;
-                        };
-                        let ip_bytes = match remote_addr.ip() {
-                            IpAddr::V4(v4) => v4.to_ipv6_mapped().octets(),
-                            IpAddr::V6(v6) => v6.octets(),
-                        };
-                        if quic_send.write_all(&ip_bytes).await.is_err()
-                            || quic_send.write_u16(remote_addr.port()).await.is_err()
-                        {
-                            let _ = tx.try_send(ConnectionEvent::new(
-                                0,
-                                502,
-                                "",
-                                remote_addr.ip(),
-                                "QUIC",
-                            ));
                         }
-                        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
-                        let _ = tokio::join!(
-                            tokio::io::copy(&mut tcp_read, &mut quic_send),
-                            tokio::io::copy(&mut quic_recv, &mut tcp_write)
-                        );
-                        return;
-                    } else {
-                        debug!("Sidecar '{sidecar_id}' for '{domain}' is offline");
-                        let _ = tx.try_send(ConnectionEvent::new(
-                            5000,
-                            503,
-                            "",
-                            remote_addr.ip(),
-                            "TCP",
-                        ));
-                        return;
                     }
                 }
             }
+
             let stream =
                 match tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(tcp_stream))
                     .await
