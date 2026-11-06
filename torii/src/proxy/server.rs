@@ -93,7 +93,7 @@ pub async fn serve(
 
         tokio::spawn(async move {
             if !active.sidecar_routes.is_empty() {
-                let mut peek_buf = [0u8; 4096];
+                let mut peek_buf = [0u8; 1024];
                 let ch_bytes = match tokio::time::timeout(
                     Duration::from_secs(5),
                     tcp_stream.peek(&mut peek_buf),
