@@ -63,11 +63,12 @@ pub async fn handle_any(
 
     let tls_no_verify = matched_route.route.tls_insecure_skip_verify;
     parts.version = hyper::Version::HTTP_11;
-    let _ = inject_headers(
+    inject_headers(
         &mut parts.headers,
         source_ip,
         &matched_route.route.upstream_host_header,
-    );
+        upgrade_intent.is_some(),
+    )?;
     let req = Request::from_parts(parts, body);
 
     let permit = matched_route
@@ -155,38 +156,71 @@ fn inject_headers(
     request_headers: &mut HeaderMap,
     source_ip: &IpAddr,
     upstream_host: &HeaderValue,
+    is_upgrade: bool,
 ) -> Result<(), Error> {
-    let connection_tokens = request_headers
-        .get(hyper::header::CONNECTION)
-        .and_then(|h| h.to_str().ok());
-    let mut to_remove: [Option<hyper::header::HeaderName>; 16] = Default::default();
-    let mut remove_count = 0;
-    for name in request_headers.keys() {
-        let is_conn_token = connection_tokens.is_some_and(|tokens| {
-            tokens
-                .split(',')
-                .any(|t| t.trim().eq_ignore_ascii_case(name.as_str()))
-        });
-        if is_forbidden_header(name.as_str()) || is_conn_token {
-            if remove_count >= 16 {
-                return Err(Error::Http(
-                    StatusCode::BAD_REQUEST,
-                    "Too many hop-by-hop headers",
-                ));
+    for header in &STRIP_HEADERS {
+        if is_upgrade && *header == hyper::header::UPGRADE {
+            continue;
+        }
+        request_headers.remove(header);
+    }
+
+    let mut tokens_to_remove: [Option<HeaderName>; 16] = Default::default();
+    let mut token_count = 0;
+
+    for conn_val in request_headers.get_all(hyper::header::CONNECTION) {
+        if let Ok(conn_str) = conn_val.to_str() {
+            if !conn_str.eq_ignore_ascii_case("keep-alive")
+                && !conn_str.eq_ignore_ascii_case("close")
+            {
+                for token in conn_str.split(',') {
+                    let trimmed = token.trim();
+                    if !trimmed.is_empty() {
+                        if is_upgrade && trimmed.eq_ignore_ascii_case("upgrade") {
+                            continue;
+                        }
+                        if token_count >= 16 {
+                            return Err(Error::Http(
+                                StatusCode::BAD_REQUEST,
+                                "Too many hop-by-hop headers",
+                            ));
+                        }
+                        if let Ok(name) = hyper::header::HeaderName::from_bytes(trimmed.as_bytes())
+                        {
+                            if matches!(
+                                name,
+                                hyper::header::CONTENT_LENGTH
+                                    | hyper::header::HOST
+                                    | hyper::header::TE
+                            ) {
+                                continue;
+                            }
+                            tokens_to_remove[token_count] = Some(name);
+                            token_count += 1;
+                        }
+                    }
+                }
             }
-            to_remove[remove_count] = Some(name.clone());
-            remove_count += 1;
         }
     }
-    for i in 0..remove_count {
-        if let Some(ref name) = to_remove[i] {
-            request_headers.remove(name);
+    request_headers.remove(hyper::header::CONNECTION);
+    for name in &tokens_to_remove[..token_count] {
+        if let Some(header_name) = name {
+            request_headers.remove(header_name);
         }
     }
-    request_headers.insert(
-        hyper::header::CONNECTION,
-        HeaderValue::from_static("keep-alive"),
-    );
+    if is_upgrade {
+        request_headers.insert(
+            hyper::header::CONNECTION,
+            HeaderValue::from_static("Upgrade"),
+        );
+    } else {
+        request_headers.insert(
+            hyper::header::CONNECTION,
+            HeaderValue::from_static("keep-alive"),
+        );
+    }
+
     let ip_header_val = match source_ip {
         IpAddr::V4(ipv4) => {
             let mut buf = [0u8; 15];
@@ -207,21 +241,27 @@ fn inject_headers(
     Ok(())
 }
 
-fn is_forbidden_header(name: &str) -> bool {
-    name.starts_with("x-forwarded-")
-        || matches!(
-            name,
-            "x-real-ip"
-                | "server"
-                | "keep-alive"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "te"
-                | "trailers"
-                | "transfer-encoding"
-                | "upgrade"
-        )
-}
+const STRIP_HEADERS: [hyper::header::HeaderName; 19] = [
+    hyper::header::TRANSFER_ENCODING,
+    hyper::header::UPGRADE,
+    hyper::header::TE,
+    hyper::header::TRAILER,
+    hyper::header::SERVER,
+    hyper::header::HeaderName::from_static("trailers"),
+    hyper::header::HeaderName::from_static("keep-alive"),
+    hyper::header::HeaderName::from_static("proxy-connection"),
+    hyper::header::HeaderName::from_static("proxy-authenticate"),
+    hyper::header::HeaderName::from_static("proxy-authorization"),
+    hyper::header::HeaderName::from_static("forwarded"),
+    hyper::header::HeaderName::from_static("x-real-ip"),
+    hyper::header::HeaderName::from_static("x-forwarded-for"),
+    hyper::header::HeaderName::from_static("x-forwarded-host"),
+    hyper::header::HeaderName::from_static("x-forwarded-proto"),
+    hyper::header::HeaderName::from_static("x-forwarded-port"),
+    hyper::header::HeaderName::from_static("x-forwarded-user"),
+    hyper::header::HeaderName::from_static("x-forwarded-email"),
+    hyper::header::HeaderName::from_static("x-forwarded-groups"),
+];
 
 fn format_ipv4_ascii(ipv4: &std::net::Ipv4Addr, buf: &mut [u8; 15]) -> usize {
     let octets = ipv4.octets();
@@ -246,4 +286,184 @@ fn format_ipv4_ascii(ipv4: &std::net::Ipv4Addr, buf: &mut [u8; 15]) -> usize {
         }
     }
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::header::{CONNECTION, HOST, HeaderMap, HeaderValue, TRANSFER_ENCODING, UPGRADE};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_inject_headers_standard_request() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("client.example.com"));
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.insert(
+            hyper::header::USER_AGENT,
+            HeaderValue::from_static("curl/8.0"),
+        );
+
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50));
+        let upstream_host = HeaderValue::from_static("backend.internal:80");
+
+        let _ = inject_headers(&mut headers, &ip, &upstream_host, false);
+
+        assert_eq!(headers.get(HOST).unwrap(), "backend.internal:80");
+        assert_eq!(headers.get(CONNECTION).unwrap(), "keep-alive");
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "192.168.1.50");
+        assert_eq!(headers.get(hyper::header::USER_AGENT).unwrap(), "curl/8.0");
+    }
+
+    #[test]
+    fn test_strip_inherent_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        headers.insert(
+            HeaderName::from_static("proxy-connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-real-ip"),
+            HeaderValue::from_static("1.2.3.4"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-forward-user"),
+            HeaderValue::from_static("admin"),
+        );
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 30));
+        let upstream_host = HeaderValue::from_static("backend:80");
+
+        let _ = inject_headers(&mut headers, &ip, &upstream_host, false);
+
+        assert!(headers.get(TRANSFER_ENCODING).is_none());
+        assert!(headers.get("proxy-connection").is_none());
+        assert!(headers.get("x-real-ip").is_none());
+        assert!(headers.get("x-forwarded-user").is_none());
+        assert_eq!(headers.get(HOST).unwrap(), "backend:80");
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "10.99.1.30");
+    }
+
+    #[test]
+    fn test_dynamic_connection_token_stripping() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_static("X-Custom-Secret, X-Internal-Flag"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-custom-secret"),
+            HeaderValue::from_static("supersecret"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-internal-flag"),
+            HeaderValue::from_static("true"),
+        );
+        headers.insert(
+            hyper::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer token123"),
+        );
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 1, 0, 0));
+        let upstream_host = HeaderValue::from_static("backend:80");
+
+        let _ = inject_headers(&mut headers, &ip, &upstream_host, false);
+
+        assert!(headers.get("x-custom-secret").is_none());
+        assert!(headers.get("x-internal-flag").is_none());
+        assert_eq!(
+            headers.get(hyper::header::AUTHORIZATION).unwrap(),
+            "Bearer token123"
+        );
+        assert_eq!(headers.get(CONNECTION).unwrap(), "keep-alive");
+        assert_eq!(headers.get(HOST).unwrap(), "backend:80");
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "10.1.0.0");
+    }
+
+    #[test]
+    fn test_hop_by_hop_token_limit_dos_protection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_static(
+                "a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z",
+            ),
+        );
+
+        let ip = IpAddr::V6(Ipv6Addr::new(10, 11, 12, 13, 14, 15, 3, 8));
+        let upstream_host = HeaderValue::from_static("backend:5000");
+
+        let result = inject_headers(&mut headers, &ip, &upstream_host, false);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Http(status, msg) => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(msg, "Too many hop-by-hop headers");
+            }
+            other => panic!("Expected Error::Http 400, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hop_by_hop_token_bypass() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_static("a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r"),
+        );
+        headers.append(CONNECTION, HeaderValue::from_static("keep-alive"));
+
+        let ip = IpAddr::V6(Ipv6Addr::new(10, 11, 12, 13, 14, 15, 3, 8));
+        let upstream_host = HeaderValue::from_static("backend:443");
+        let result = inject_headers(&mut headers, &ip, &upstream_host, false);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::Http(status, msg) => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(msg, "Too many hop-by-hop headers");
+            }
+            other => panic!("Expected Error::Http 400, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_websocket_upgrade_preservation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert(
+            HeaderName::from_static("sec-websocket-key"),
+            HeaderValue::from_static("dGhlIHNhbXBsZQ=="),
+        );
+
+        let ip = IpAddr::V6(Ipv6Addr::new(15, 15, 15, 15, 15, 15, 15, 15));
+        let upstream_host = HeaderValue::from_static("upstream:80");
+
+        let _ = inject_headers(&mut headers, &ip, &upstream_host, true);
+
+        assert_eq!(headers.get(UPGRADE).unwrap(), "websocket");
+        assert_eq!(headers.get(CONNECTION).unwrap(), "Upgrade");
+        assert!(headers.get("sec-websocket-key").is_some());
+        assert_eq!(headers.get(HOST).unwrap(), "upstream:80");
+        assert_eq!(headers.get("x-forwarded-for").unwrap(), "f:f:f:f:f:f:f:f");
+    }
+
+    #[test]
+    fn test_format_ipv4_ascii_edge_cases() {
+        let test_cases = [
+            (Ipv4Addr::new(0, 0, 0, 0), "0.0.0.0"),
+            (Ipv4Addr::new(127, 0, 0, 1), "127.0.0.1"),
+            (Ipv4Addr::new(192, 168, 1, 254), "192.168.1.254"),
+            (Ipv4Addr::new(255, 255, 255, 255), "255.255.255.255"),
+            (Ipv4Addr::new(10, 99, 1, 30), "10.99.1.30"),
+        ];
+
+        for (ip, expected_str) in test_cases {
+            let mut buf = [0u8; 15];
+            let len = format_ipv4_ascii(&ip, &mut buf);
+            let result_str = std::str::from_utf8(&buf[..len]).unwrap();
+            assert_eq!(result_str, expected_str)
+        }
+    }
 }

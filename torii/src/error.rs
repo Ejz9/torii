@@ -121,6 +121,7 @@ impl IntoResponse for Error {
             Error::RouteNotFound(_) => {
                 (StatusCode::NOT_FOUND, "Requested URL not found").into_response()
             }
+            Error::Http(status, msg) => (status, msg).into_response(),
             err => {
                 tracing::error!("Internal error: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
