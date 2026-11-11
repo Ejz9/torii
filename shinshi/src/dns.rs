@@ -6,7 +6,7 @@ use std::{
 };
 
 use keidai::{ControlMessage, Route, RouteConfig, parse_certificate, recv_control, send_control};
-use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+use rcgen::{CertificateParams, DistinguishedName, KeyPair, PKCS_ECDSA_P256_SHA256};
 use rustls::sign::CertifiedKey;
 use tokio::{fs, time::Instant};
 use tracing::error;
@@ -69,7 +69,10 @@ pub async fn refresh_certificates(
             }
         }
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
-        let params = CertificateParams::new(vec![domain.clone()])?;
+        let mut params = CertificateParams::new(vec![domain.clone()])?;
+        let mut dn = DistinguishedName::new();
+        dn.push(rcgen::DnType::CommonName, &domain);
+        params.distinguished_name = dn;
         let csr_der = params.serialize_request(&key_pair)?.der().to_vec();
         let private_key_pem = key_pair.serialize_pem();
         send_control(
