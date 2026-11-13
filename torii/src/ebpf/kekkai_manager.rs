@@ -126,6 +126,7 @@ impl FromStr for Ipv6Prefix {
     }
 }
 
+// SAFETY: Both structs have `#[repr(C)]` and zerocopy traits. Invalid ordering, patterns, or padding do not occur.
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
@@ -325,6 +326,8 @@ pub fn save_sets_to_disk<T: IntoBytes + Immutable, P: AsRef<Path>>(
 
 pub fn load_sets_from_disk<P: AsRef<Path>>(path: P) -> Result<Mmap, Error> {
     let file = File::open(path)?;
+    // SAFETY: The target file resides by default in /var/lib/torii/ inside Torii's private dynamic data directory and is written atomically via temporary files before renaming.
+    // No concurrent processes modify or truncate this file while mapped.
     Ok(unsafe { Mmap::map(&file)? })
 }
 
@@ -456,6 +459,8 @@ async fn init_ebpf(iface: &str) -> anyhow::Result<aya::Ebpf> {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
     };
+    // SAFETY: `rlim` is a valid struct on the stack with RLIM_INFINITY values.
+    // `setrlimit` is a standard POSIX syscall to allow eBPF map memory allocation.
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
         debug!("remove limit on locked memory failed, ret is: {ret}");

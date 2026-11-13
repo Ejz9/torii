@@ -212,14 +212,22 @@ async fn main() -> anyhow::Result<()> {
                 socket.set_reuseaddr(true)?;
                 socket.set_reuseport(true)?;
                 let timeout_secs: libc::c_int = 5;
-                unsafe {
+                // SAFETY: `socket.as_raw_fd()` returns a valid open file descriptor managed by Tokio.
+                // `timeout_secs` is a valid, properly aligned integer on the local stack whose lifetime outlasts this synchronous syscall
+                let ret = unsafe {
                     libc::setsockopt(
                         socket.as_raw_fd(),
                         libc::IPPROTO_TCP,
                         libc::TCP_DEFER_ACCEPT,
                         &timeout_secs as *const _ as *const libc::c_void,
                         std::mem::size_of_val(&timeout_secs) as libc::socklen_t,
-                    );
+                    )
+                };
+                if ret != 0 {
+                    warn!(
+                        "Failed to set TCP_DEFER_ACCEPT on listener socket: {}",
+                        std::io::Error::last_os_error()
+                    )
                 }
                 socket.bind(socket_addr)?;
                 let listener = socket.listen(10240)?;
