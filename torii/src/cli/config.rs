@@ -333,7 +333,7 @@ impl FromStr for DomainTier {
 #[derive(Clone)]
 pub enum SmallPath {
     Static(&'static str),
-    Inline { buf: [u8; 30], len: u8 },
+    Inline { buf: [u8; 62], len: u8 },
     Heap(String),
 }
 
@@ -344,8 +344,8 @@ impl SmallPath {
             return SmallPath::Static("/");
         }
         let bytes = s.as_bytes();
-        if bytes.len() <= 30 {
-            let mut buf = [0u8; 30];
+        if bytes.len() <= 62 {
+            let mut buf = [0u8; 62];
             buf[..bytes.len()].copy_from_slice(bytes);
             SmallPath::Inline {
                 buf,

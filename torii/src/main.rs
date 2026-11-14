@@ -159,19 +159,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             worker_set.spawn(sando::listener(network_token.clone(), state.clone()));
-            if let Some(endpoints) = &state.endpoints {
-                fetch_jwks(&endpoints, &state.jwks_cache).await?;
-            }
             let private_routes = Router::new()
                 .route("/", any(handle_any))
                 .route("/{*path}", any(handle_any))
                 .route_layer(middleware::from_fn_with_state(state.clone(), enforce_auth));
             let mut app = Router::new().merge(private_routes);
-            if state.config.oidc_provider.is_some() {
+            if let Some(endpoints) = &state.endpoints {
+                fetch_jwks(endpoints, &state.jwks_cache).await?;
                 let auth_routes = Router::new()
                     .route("/auth/login", any(auth_redirect))
                     .route("/auth/callback", any(auth_callback));
-                app = app.merge(auth_routes)
+                app = app.merge(auth_routes);
             };
             let app = app
                 .layer(middleware::from_fn_with_state(state.clone(), temizuya))

@@ -81,15 +81,12 @@ pub async fn auth_redirect(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginQuery>,
 ) -> impl IntoResponse {
-    let endpoints = state
-        .endpoints
-        .as_ref()
-        .expect("FATAL: Auth route hit without OIDC configured");
-    let oidc_provider = state
-        .config
-        .oidc_provider
-        .as_ref()
-        .expect("FATAL: Auth route hit without OIDC configured");
+    let (Some(endpoints), Some(oidc_provider)) = (
+        &state.endpoints.as_ref(),
+        &state.config.oidc_provider.as_ref(),
+    ) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let code = Uuid::new_v4().to_string();
     let uri = format!(
         "{}?client_id={}&response_type=code&redirect_uri={}&scope=openid%20profile%20email%20offline_access&state={}",
@@ -101,7 +98,7 @@ pub async fn auth_redirect(
     );
     let target_url = query.return_to.unwrap_or_else(|| "/".to_string());
     state.csrf_cache.insert(code, target_url).await;
-    Redirect::temporary(&uri)
+    Redirect::temporary(&uri).into_response()
 }
 
 #[derive(Deserialize)]
@@ -126,16 +123,13 @@ pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AuthCallbackQuery>,
 ) -> Result<impl IntoResponse, Error> {
-    let endpoints = state
-        .endpoints
-        .as_ref()
-        .expect("FATAL: Auth route hit without OIDC configured");
     if let Some(return_url) = state.csrf_cache.remove(&query.state).await {
-        let oidc_provider = state
-            .config
-            .oidc_provider
-            .as_ref()
-            .expect("FATAL: Auth route hit without OIDC configured");
+        let (Some(endpoints), Some(oidc_provider)) = (
+            &state.endpoints.as_ref(),
+            &state.config.oidc_provider.as_ref(),
+        ) else {
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
         let response = reqwest::Client::new()
             .post(&endpoints.token_endpoint)
             .form(&[
@@ -150,7 +144,7 @@ pub async fn auth_callback(
             .json::<TokenResponse>()
             .await?;
         let valid_claims = validate_token(
-            &state.limiter_cache,
+            &state.jwks_limiter,
             endpoints,
             &state.jwks_cache,
             oidc_provider,
@@ -205,7 +199,7 @@ pub struct Claims {
 
 #[instrument(skip(token), err)]
 pub async fn validate_token(
-    limiter_cache: &Cache<String, ()>,
+    jwks_limiter: &governor::DefaultDirectRateLimiter,
     endpoints: &Endpoints,
     jwks_cache: &Cache<String, DecodingKey>,
     oidc_provider: &OidcProvider,
@@ -215,8 +209,7 @@ pub async fn validate_token(
     let kid = header.kid.ok_or(Error::InvalidKeyId)?;
     let mut key_wrapper = jwks_cache.get(&kid).await;
     if key_wrapper.is_none() {
-        if !limiter_cache.contains_key("jwks_limiter") {
-            limiter_cache.insert("jwks_limiter".to_string(), ()).await;
+        if jwks_limiter.check().is_ok() {
             fetch_jwks(endpoints, jwks_cache).await?;
         }
         key_wrapper = jwks_cache.get(&kid).await;

@@ -1,3 +1,5 @@
+use anyhow::Context;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use keidai::{ConnectionEvent, ShinshiName};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -32,7 +34,7 @@ pub struct AppState {
     pub endpoints: Option<Endpoints>,
     pub csrf_cache: Cache<String, String>,
     pub jwks_cache: Cache<String, DecodingKey>,
-    pub limiter_cache: Cache<String, ()>,
+    pub jwks_limiter: DefaultDirectRateLimiter,
     pub dynamic_config: Arc<ArcSwap<ActiveState>>,
     pub connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
     pub insecure_connection_pool: Client<HttpsConnector<HttpConnector>, Body>,
@@ -105,10 +107,9 @@ impl AppState {
             .time_to_live(Duration::from_secs(300))
             .build();
         let jwks_cache: Cache<String, DecodingKey> = Cache::new(20);
-        let limiter_cache: Cache<String, ()> = Cache::builder()
-            .max_capacity(10)
-            .time_to_live(Duration::from_secs(15))
-            .build();
+        let jwks_limiter = RateLimiter::direct(
+            Quota::with_period(Duration::from_secs(15)).expect("15s cannot be zero"),
+        );
         let configuration_file = read_to_string(config_path).await?;
         let configuration_parsed = from_str(&configuration_file)?;
         let mut cert_store = RootCertStore::empty();
@@ -160,7 +161,7 @@ impl AppState {
         http.set_keepalive(Some(Duration::from_secs(60)));
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
-            .expect("valid native roots")
+            .context("Failed to load native CA root certificates. Verify system CA certificates are installed.")?
             .https_or_http()
             .enable_http1()
             .wrap_connector(http.clone());
@@ -187,7 +188,7 @@ impl AppState {
             endpoints,
             csrf_cache,
             jwks_cache,
-            limiter_cache,
+            jwks_limiter,
             dynamic_config,
             connection_pool,
             insecure_connection_pool,
