@@ -100,7 +100,7 @@ pub async fn enforce_auth(
     }
     let routes = state.routes.load();
     let Some(route) = routes.get(domain) else {
-        return bounce(req.uri(), is_background_asset, &sec_fetch_mode);
+        return bounce(req.uri(), is_background_asset, sec_fetch_mode);
     };
 
     if !route.public_bypass {
@@ -115,9 +115,9 @@ pub async fn enforce_auth(
             }
 
             let Some(cookie) = headers.get(header::COOKIE) else {
-                return bounce(req.uri(), is_background_asset, &sec_fetch_mode);
+                return bounce(req.uri(), is_background_asset, sec_fetch_mode);
             };
-            let cookie = &cookie.to_str().unwrap_or("");
+            let cookie = cookie.to_str().unwrap_or("");
             let torii_session = cookie.split(';').find_map(|pair| {
                 let pair: &str = pair.trim();
                 if pair.starts_with("torii_session=") {
@@ -127,15 +127,15 @@ pub async fn enforce_auth(
                 }
             });
             let Some(session) = torii_session else {
-                return bounce(req.uri(), is_background_asset, &sec_fetch_mode);
+                return bounce(req.uri(), is_background_asset, sec_fetch_mode);
             };
 
             let Ok(public_key) = biscuit_auth::PublicKey::try_from(root_public_key.clone()) else {
-                return bounce(req.uri(), is_background_asset, &sec_fetch_mode);
+                return bounce(req.uri(), is_background_asset, sec_fetch_mode);
             };
 
             let Ok(biscuit_token) = Biscuit::from_base64(session, public_key) else {
-                return bounce(req.uri(), is_background_asset, &sec_fetch_mode);
+                return bounce(req.uri(), is_background_asset, sec_fetch_mode);
             };
 
             let mut builder = authorizer!(
@@ -153,7 +153,7 @@ pub async fn enforce_auth(
                 )) if checks.is_empty() => {
                     return Ok((StatusCode::FORBIDDEN, "Forbidden").into_response());
                 }
-                Err(_) => return bounce(req.uri(), is_background_asset, &sec_fetch_mode),
+                Err(_) => return bounce(req.uri(), is_background_asset, sec_fetch_mode),
             }
             inject_headers(req.headers_mut(), &mut authorizer)?;
         }

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use arc_swap::ArcSwap;
 use axum::body::Body;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
@@ -41,7 +42,7 @@ impl AppState {
         http.set_keepalive(Some(Duration::from_secs(60)));
         let connector = HttpsConnectorBuilder::new()
             .with_native_roots()
-            .expect("valid native roots")
+            .context("Failed to load native CA root certificates. Verify system CA certificates are installed.")?
             .https_or_http()
             .enable_http1()
             .wrap_connector(http.clone());

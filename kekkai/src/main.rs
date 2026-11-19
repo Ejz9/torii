@@ -61,7 +61,7 @@ fn record_metric(index: u32) {
 }
 
 fn block_ipv4(address: u32) -> bool {
-    unsafe { BLOCKLIST_V4.get(&address).is_some() }
+    unsafe { BLOCKLIST_V4.get(address).is_some() }
 }
 fn block_ipv4_prefix(address: u32) -> bool {
     let key = Key::new(32, address);
@@ -104,7 +104,7 @@ fn try_kekkai(ctx: XdpContext) -> Result<u32, ()> {
                 },
             )
         }
-        _ => return Ok(xdp_action::XDP_PASS),
+        _ => Ok(xdp_action::XDP_PASS),
     }
 }
 
