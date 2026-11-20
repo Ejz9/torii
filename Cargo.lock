@@ -1850,9 +1850,14 @@ name = "keidai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "aws-lc-rs",
+ "axum",
  "base64 0.23.1",
  "biscuit-auth",
  "http",
+ "hyper-rustls",
+ "hyper-util",
  "postcard",
  "quinn",
  "rustls",

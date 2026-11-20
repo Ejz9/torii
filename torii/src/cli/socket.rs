@@ -19,6 +19,7 @@ use crate::{
         config::{ActiveState, ToriiConfig},
     },
     ebpf::{
+        hashira::EbpfEntry,
         kekkai_manager::IpPrefix,
         ofuda::{OfudaEntry, get_ofuda_list},
     },
@@ -37,6 +38,7 @@ pub async fn listener(
         )>,
     >,
     ofuda_tx: tokio::sync::mpsc::Sender<OfudaEntry>,
+    hashira_tx: tokio::sync::mpsc::Sender<EbpfEntry>,
     mihari_notify: Option<Arc<tokio::sync::Notify>>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -105,6 +107,35 @@ pub async fn listener(
                 }
             }
             SocketMessage::UpdateBans(bans_args) => {
+                let whitelist = &state.dynamic_config.load().security.whitelist;
+                let mut blocked = Vec::new();
+                for addr in &bans_args.add {
+                    if whitelist.iter().any(|prefix| prefix.contains(&addr.ip())) {
+                        blocked.push(addr.to_string());
+                    }
+                }
+                if !blocked.is_empty() {
+                    send_message(
+                        &mut stream,
+                        SocketResponse::FatalError(format!(
+                            "Cannot ban whitelisted address(es): {}",
+                            blocked.join(", ")
+                        )),
+                    )
+                    .await;
+                    continue;
+                }
+                for addr in &bans_args.remove {
+                    match addr {
+                        IpPrefix::V4(v4) if v4.prefix_len == 32 => {
+                            let _ = hashira_tx.try_send(EbpfEntry::DeleteIpv4(v4.addr));
+                        }
+                        IpPrefix::V6(v6) if v6.prefix_len == 128 => {
+                            let _ = hashira_tx.try_send(EbpfEntry::InsertIpv6Addr(v6.addr));
+                        }
+                        _ => {}
+                    }
+                }
                 let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), Vec<String>>>();
                 let entry: OfudaEntry = (bans_args, tx).into();
                 if let Err(e) = ofuda_tx.send(entry).await {

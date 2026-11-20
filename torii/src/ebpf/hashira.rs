@@ -199,6 +199,13 @@ impl PolicyEngine {
         let mut strikes: u32 = 0;
 
         let request_count = self.velocity_tracker.get_with(event.ip_addr(), || 0) + 1;
+        if security_config
+            .whitelist
+            .iter()
+            .any(|prefix| prefix.contains(&event.ip_addr()))
+        {
+            return;
+        }
         self.velocity_tracker.insert(event.ip_addr(), request_count);
         if request_count > security_config.ebpf_velocity_threshhold as u32 {
             strikes += security_config.ebpf_strike_threshold as u32;

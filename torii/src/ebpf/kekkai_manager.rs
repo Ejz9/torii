@@ -30,6 +30,7 @@ use crate::{
 #[derive(
     Copy,
     Clone,
+    Debug,
     Eq,
     PartialEq,
     IntoBytes,
@@ -50,6 +51,7 @@ pub struct Ipv4Prefix {
 #[derive(
     Copy,
     Clone,
+    Debug,
     Eq,
     PartialEq,
     IntoBytes,
@@ -64,6 +66,18 @@ pub struct Ipv4Prefix {
 pub struct Ipv6Prefix {
     pub prefix_len: u32,
     pub addr: [u8; 16],
+}
+
+impl Ipv4Prefix {
+    pub fn ip(&self) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::from(self.addr))
+    }
+}
+
+impl Ipv6Prefix {
+    pub fn ip(&self) -> std::net::IpAddr {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::from(self.addr))
+    }
 }
 
 impl Display for Ipv4Prefix {
@@ -130,10 +144,47 @@ impl FromStr for Ipv6Prefix {
 unsafe impl aya::Pod for Ipv4Prefix {}
 unsafe impl aya::Pod for Ipv6Prefix {}
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum IpPrefix {
     V4(Ipv4Prefix),
     V6(Ipv6Prefix),
+}
+
+impl IpPrefix {
+    pub fn contains(&self, ip: &std::net::IpAddr) -> bool {
+        match (self, ip) {
+            (IpPrefix::V4(prefix), std::net::IpAddr::V4(ipv4)) => {
+                let mask = if prefix.prefix_len == 0 {
+                    0
+                } else {
+                    !0u32 << (32 - prefix.prefix_len)
+                };
+                (u32::from(*ipv4) & mask) == (prefix.addr & mask)
+            }
+            (IpPrefix::V6(prefix), std::net::IpAddr::V6(ipv6)) => {
+                let ip_octets = ipv6.octets();
+                let full_bytes = (prefix.prefix_len / 8) as usize;
+                let remainder_bits = prefix.prefix_len % 8;
+                if ip_octets[..full_bytes] != prefix.addr[..full_bytes] {
+                    return false;
+                }
+                if remainder_bits > 0 {
+                    let mask = !0u8 << (8 - remainder_bits);
+                    if (ip_octets[full_bytes] & mask) != (prefix.addr[full_bytes] & mask) {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    pub fn ip(&self) -> std::net::IpAddr {
+        match self {
+            IpPrefix::V4(v4) => v4.ip(),
+            IpPrefix::V6(v6) => v6.ip(),
+        }
+    }
 }
 
 impl Display for IpPrefix {
@@ -428,6 +479,7 @@ pub async fn run(
         (&state.config.mihari_provider, mihari_notify)
     {
         child_workers.spawn(mihari::run(
+            Arc::clone(&state.dynamic_config),
             mihari_provider.clone(),
             state.config.mihari_interval,
             state.config.kekkai_path.clone(),

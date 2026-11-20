@@ -13,7 +13,11 @@ use rustls::{client::WebPkiServerVerifier, sign::CertifiedKey};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{acme::dns::verify_certificate_signature, error::Error};
+use crate::{
+    acme::dns::verify_certificate_signature,
+    ebpf::kekkai_manager::{IpPrefix, Ipv4Prefix, Ipv6Prefix},
+    error::Error,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +84,12 @@ impl ActiveState {
                 ));
             };
             config.security.path_matcher = Some(Arc::new(matcher));
+        }
+        if !config.security.whitelist.contains(&LOCALHOST_V4) {
+            config.security.whitelist.push(LOCALHOST_V4);
+        }
+        if !config.security.whitelist.contains(&LOCALHOST_V6) {
+            config.security.whitelist.push(LOCALHOST_V6);
         }
         let mut individual_certs = HashSet::new();
         let mut wildcard_certs = HashSet::new();
@@ -278,6 +288,8 @@ pub struct SecurityConfig {
     pub ebpf_velocity_threshhold: u64,
     #[serde(default = "ebpf_lockout_duration_secs")]
     pub ebpf_lockout_duration_secs: u64,
+    #[serde(default = "default_whitelist")]
+    pub whitelist: Vec<IpPrefix>,
     #[serde(skip)]
     pub path_matcher: Option<Arc<AhoCorasick>>,
 }
@@ -290,6 +302,7 @@ impl Default for SecurityConfig {
             ebpf_strike_threshold: 10,
             ebpf_velocity_threshhold: 150,
             ebpf_lockout_duration_secs: 3600,
+            whitelist: vec![],
             path_matcher: None,
         }
     }
@@ -309,6 +322,18 @@ fn ebpf_velocity_threshhold() -> u64 {
 }
 fn ebpf_lockout_duration_secs() -> u64 {
     3600
+}
+
+const LOCALHOST_V4: IpPrefix = IpPrefix::V4(Ipv4Prefix {
+    prefix_len: 32,
+    addr: std::net::Ipv4Addr::LOCALHOST.to_bits(),
+});
+const LOCALHOST_V6: IpPrefix = IpPrefix::V6(Ipv6Prefix {
+    prefix_len: 128,
+    addr: std::net::Ipv6Addr::LOCALHOST.octets(),
+});
+fn default_whitelist() -> Vec<IpPrefix> {
+    vec![LOCALHOST_V4, LOCALHOST_V6]
 }
 
 pub enum DomainTier {

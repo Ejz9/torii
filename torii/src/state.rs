@@ -57,6 +57,8 @@ ebpf_strike_threshold = 10
 ebpf_velocity_threshhold = 150
 # How long (in seconds) the offending IP remains locked out
 ebpf_lockout_duration_secs = 300
+# IPs that cannot be added to the eBPF maps
+whitelist = ["192.168.0.0/16", "10.0.0.0/8"]
 
 [routes]
 # Routes are defined by their subdomain and path

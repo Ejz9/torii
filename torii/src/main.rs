@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 config_reload_tx,
                 acme_tx,
                 ofuda_tx,
+                hashira_tx.clone(),
                 mihari_notify.clone(),
                 worker_token.clone(),
             ));

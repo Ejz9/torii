@@ -2,12 +2,14 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub mod crowdsec;
 
+use arc_swap::ArcSwap;
 use aya::maps::{LpmTrie, MapData};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use zerocopy::FromBytes;
 
 use crate::{
+    cli::config::ActiveState,
     ebpf::{
         kekkai_manager::{Ipv4Prefix, Ipv6Prefix, load_sets_from_disk, save_sets_to_disk},
         mihari::crowdsec::CrowdSecProvider,
@@ -65,6 +67,7 @@ macro_rules! sync_diff {
 }
 
 pub async fn run(
+    dynamic_config: Arc<ArcSwap<ActiveState>>,
     provider: MihariProviderKind,
     interval: u64,
     kekkai_path: String,
@@ -103,6 +106,12 @@ pub async fn run(
             interval.tick().await;
             continue;
         };
+
+        let whitelist = &dynamic_config.load().security.whitelist;
+        incoming_ipv4_entries
+            .retain(|entry| !whitelist.iter().any(|prefix| prefix.contains(&entry.ip())));
+        incoming_ipv6_entries
+            .retain(|entry| !whitelist.iter().any(|prefix| prefix.contains(&entry.ip())));
 
         incoming_ipv4_entries.sort_unstable();
         incoming_ipv6_entries.sort_unstable();
