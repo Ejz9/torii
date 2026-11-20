@@ -1,9 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use arc_swap::ArcSwap;
 use rustls::{
-    crypto,
-    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    sign::CertifiedKey,
+    crypto, pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject}, server::{ClientHello, ResolvesServerCert}, sign::CertifiedKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,4 +37,35 @@ pub fn parse_certificate(
         CertificateDer::pem_slice_iter(&cert_chain_bytes).collect::<Result<Vec<_>, _>>()?;
     let signing_key = crypto::aws_lc_rs::sign::any_supported_type(&key)?;
     Ok(Arc::new(CertifiedKey::new(chain, signing_key)))
+}
+
+#[derive(Debug)]
+pub struct CertificateResolver {
+    certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
+}
+
+impl CertificateResolver {
+    pub fn new(certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>) -> Self {
+        Self { certificates }
+    }
+}
+
+impl ResolvesServerCert for CertificateResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let domain = client_hello.server_name()?;
+        let certificates = self.certificates.load();
+        if let Some(cert) = certificates.get(domain) {
+            return Some(cert.clone());
+        }
+        if let Some((_, root)) = domain.split_once('.') {
+            for (key, cert) in certificates.iter() {
+                if let Some(suffix) = key.strip_prefix("*.")
+                    && suffix == root
+                {
+                    return Some(cert.clone());
+                }
+            }
+        }
+        None
+    }
 }

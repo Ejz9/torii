@@ -4,10 +4,6 @@ use http_body_util::BodyExt;
 use hyper::StatusCode;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use keidai::{ConnectionEvent, ShinshiName};
-use rustls::{
-    server::{ClientHello, ResolvesServerCert},
-    sign::CertifiedKey,
-};
 use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 use tokio_rustls::TlsAcceptor;
@@ -16,37 +12,6 @@ use tower::Service;
 use tracing::{debug, error};
 
 use crate::{cli::config::ActiveState, proxy::sni::extract_sni};
-
-#[derive(Debug)]
-pub struct CertificateResolver {
-    certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
-}
-
-impl CertificateResolver {
-    pub fn new(certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>) -> Self {
-        Self { certificates }
-    }
-}
-
-impl ResolvesServerCert for CertificateResolver {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let domain = client_hello.server_name()?;
-        let certificates = self.certificates.load();
-        if let Some(cert) = certificates.get(domain) {
-            return Some(cert.clone());
-        }
-        if let Some((_, root)) = domain.split_once('.') {
-            for (key, cert) in certificates.iter() {
-                if let Some(suffix) = key.strip_prefix("*.") {
-                    if suffix == root {
-                        return Some(cert.clone());
-                    }
-                }
-            }
-        }
-        None
-    }
-}
 
 // TCP HTTP connection server based on RFC 9112 and RFC 9113
 pub async fn serve(

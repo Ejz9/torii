@@ -7,6 +7,7 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
+use keidai::format_ipv4_ascii;
 use std::{net::IpAddr, sync::Arc};
 use tracing::debug;
 
@@ -262,31 +263,6 @@ const STRIP_HEADERS: [hyper::header::HeaderName; 19] = [
     hyper::header::HeaderName::from_static("x-forwarded-email"),
     hyper::header::HeaderName::from_static("x-forwarded-groups"),
 ];
-
-fn format_ipv4_ascii(ipv4: &std::net::Ipv4Addr, buf: &mut [u8; 15]) -> usize {
-    let octets = ipv4.octets();
-    let mut pos = 0;
-    for (idx, &octet) in octets.iter().enumerate() {
-        if idx > 0 {
-            buf[pos] = b'.';
-            pos += 1;
-        }
-        if octet >= 100 {
-            buf[pos] = b'0' + (octet / 100);
-            buf[pos + 1] = b'0' + ((octet / 10) % 10);
-            buf[pos + 2] = b'0' + (octet % 10);
-            pos += 3;
-        } else if octet >= 10 {
-            buf[pos] = b'0' + (octet / 10);
-            buf[pos + 1] = b'0' + (octet % 10);
-            pos += 2;
-        } else {
-            buf[pos] = b'0' + octet;
-            pos += 1;
-        }
-    }
-    pos
-}
 
 #[cfg(test)]
 mod tests {

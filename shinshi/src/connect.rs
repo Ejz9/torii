@@ -1,11 +1,14 @@
 use std::{collections::HashMap, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
-use keidai::{ControlMessage, ShinshiConfig, SidecarInit, recv_control, send_control};
+use keidai::{
+    ControlMessage, NoCertificateVerification, ShinshiConfig, SidecarInit, recv_control,
+    send_control,
+};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::sign::CertifiedKey;
 use tokio::{net::lookup_host, time::Instant};
 
-use crate::{dns::refresh_certificates, state::NoCertificateVerification};
+use crate::dns::refresh_certificates;
 
 pub async fn connect_gateway(init: &SidecarInit) -> anyhow::Result<quinn::Connection> {
     let verifier = Arc::new(NoCertificateVerification {

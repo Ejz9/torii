@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Context;
 use axum::Router;
 use clap::Parser;
-use keidai::{ConnectionEvent, ControlMessage, recv_control};
+use keidai::{CertificateResolver, ConnectionEvent, ControlMessage, recv_control};
 use rustls::{crypto::aws_lc_rs::Ticketer, server::ServerSessionMemoryCache};
 use tokio::{
     task::JoinSet,
@@ -33,7 +33,6 @@ use crate::{
     dns::refresh_certificates,
     middleware::{enforce_auth, temizuya},
     router::{build_active_routes, handle_any},
-    server::CertificateResolver,
     state::AppState,
 };
 

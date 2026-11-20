@@ -1,49 +1,13 @@
-use std::{collections::HashMap, net::IpAddr, pin::Pin, sync::Arc, time::Duration};
+use std::{net::IpAddr, pin::Pin, sync::Arc, time::Duration};
 
-use arc_swap::ArcSwap;
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use keidai::ConnectionEvent;
-use rustls::{
-    server::{ClientHello, ResolvesServerCert},
-    sign::CertifiedKey,
-};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 use tracing::{debug, error};
-
-#[derive(Debug)]
-pub struct CertificateResolver {
-    certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>,
-}
-
-impl CertificateResolver {
-    pub fn new(certificates: Arc<ArcSwap<HashMap<String, Arc<CertifiedKey>>>>) -> Self {
-        Self { certificates }
-    }
-}
-
-impl ResolvesServerCert for CertificateResolver {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let domain = client_hello.server_name()?;
-        let certificates = self.certificates.load();
-        if let Some(cert) = certificates.get(domain) {
-            return Some(cert.clone());
-        }
-        if let Some((_, root)) = domain.split_once('.') {
-            for (key, cert) in certificates.iter() {
-                if let Some(suffix) = key.strip_prefix("*.") {
-                    if suffix == root {
-                        return Some(cert.clone());
-                    }
-                }
-            }
-        }
-        None
-    }
-}
 
 pub async fn serve(
     conn: quinn::Connection,

@@ -1,6 +1,5 @@
-use anyhow::Context;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
-use keidai::{ConnectionEvent, ShinshiName};
+use keidai::{ConnectionEvent, ShinshiName, create_connection_pools};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,18 +12,14 @@ use crate::error::Error;
 use crate::tunnel::sando::load_or_generate_tunnel_cert;
 use arc_swap::ArcSwap;
 use axum::body::Body;
-use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_util::{
-    client::legacy::{Client, connect::HttpConnector},
-    rt::TokioExecutor,
-};
+use hyper_rustls::HttpsConnector;
+use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use jsonwebtoken::DecodingKey;
 use moka::future::Cache;
 use rustls::client::WebPkiServerVerifier;
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
 use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
-use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types};
+use rustls::{RootCertStore, ServerConfig, pki_types};
 use tokio::sync::mpsc;
 use toml::from_str;
 use tracing::info;
@@ -156,33 +151,7 @@ impl AppState {
         let certificates = Arc::new(ArcSwap::from_pointee(certs));
         let sidecars = Arc::new(ArcSwap::from_pointee(HashMap::new()));
         let (tunnel_config, tunnel_fingerprint) = load_or_generate_tunnel_cert(&config.sando_path)?;
-        let mut http = HttpConnector::new();
-        http.set_nodelay(true);
-        http.set_keepalive(Some(Duration::from_secs(60)));
-        let connector = HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .context("Failed to load native CA root certificates. Verify system CA certificates are installed.")?
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http.clone());
-        let tls_no_verify = NoCertificateVerification {};
-        let insecure_tls_config = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(tls_no_verify))
-            .with_no_client_auth();
-        let insecure_connector = HttpsConnectorBuilder::new()
-            .with_tls_config(insecure_tls_config)
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http);
-        let connection_pool = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(usize::MAX)
-            .build(connector);
-        let insecure_connection_pool = Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .pool_max_idle_per_host(usize::MAX)
-            .build(insecure_connector);
+        let (connection_pool, insecure_connection_pool) = create_connection_pools(None)?;
         Ok(Self {
             config,
             endpoints,
@@ -201,42 +170,5 @@ impl AppState {
             config_reload_tx,
             root_keypair,
         })
-    }
-}
-
-#[derive(Debug)]
-pub struct NoCertificateVerification {}
-
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &[rustls::pki_types::CertificateDer<'_>],
-        _: &rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
     }
 }

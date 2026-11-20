@@ -7,7 +7,7 @@ use axum::{
 };
 use hyper::{HeaderMap, StatusCode};
 use hyper_util::rt::TokioIo;
-use keidai::{ActiveRoute, ShinshiConfig};
+use keidai::{ActiveRoute, ShinshiConfig, format_ipv4_ascii};
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use tracing::debug;
 
@@ -185,31 +185,6 @@ fn is_forbidden_header(name: &str) -> bool {
                 | "transfer-encoding"
                 | "upgrade"
         )
-}
-
-fn format_ipv4_ascii(ipv4: &std::net::Ipv4Addr, buf: &mut [u8; 15]) -> usize {
-    let octets = ipv4.octets();
-    let mut pos = 0;
-    for (idx, &octet) in octets.iter().enumerate() {
-        if idx > 0 {
-            buf[pos] = b'.';
-            pos += 1;
-        }
-        if octet >= 100 {
-            buf[pos] = b'0' + (octet / 100);
-            buf[pos + 1] = b'0' + ((octet / 10) % 10);
-            buf[pos + 2] = b'0' + (octet % 10);
-            pos += 3;
-        } else if octet >= 10 {
-            buf[pos] = b'0' + (octet / 10);
-            buf[pos + 1] = b'0' + (octet % 10);
-            pos += 2;
-        } else {
-            buf[pos] = b'0' + octet;
-            pos += 1;
-        }
-    }
-    pos
 }
 
 pub fn build_active_routes(config: &ShinshiConfig) -> HashMap<String, Arc<ActiveRoute>> {
